@@ -1559,17 +1559,40 @@ class WakeStreamingSatellite(SatelliteBase):
                     except Exception:
                         pass
 
-                # Now kill audio processes if TTS was playing (this will cause restart)
+                # Try to stop TTS without crashing the satellite
                 if was_tts_playing and self.settings.snd.command:
                     try:
                         import subprocess
-                        cmd_name = self.settings.snd.command[0].split('/')[-1]
-                        subprocess.run(['pkill', '-f', cmd_name], check=False)
-                        _LOGGER.debug("Killed %s processes - satellite will restart", cmd_name)
-                    except Exception as e:
-                        _LOGGER.debug("Could not kill audio processes: %s", e)
+                        import signal
 
-                _LOGGER.info("Interrupted - satellite restarting")
+                        # Try SIGTERM first (graceful)
+                        cmd_name = self.settings.snd.command[0].split('/')[-1]
+                        result = subprocess.run(['pgrep', '-f', cmd_name], capture_output=True, text=True)
+                        if result.returncode == 0:
+                            pids = result.stdout.strip().split('\n')
+                            for pid in pids:
+                                if pid.strip():
+                                    try:
+                                        subprocess.run(['kill', '-TERM', pid.strip()], check=False)
+                                        _LOGGER.debug("Sent SIGTERM to PID %s (%s)", pid.strip(), cmd_name)
+                                    except Exception:
+                                        pass
+
+                            # Wait a moment for graceful shutdown
+                            await asyncio.sleep(0.3)
+
+                            # If still running, use SIGKILL
+                            result = subprocess.run(['pgrep', '-f', cmd_name], capture_output=True)
+                            if result.returncode == 0:
+                                subprocess.run(['pkill', '-9', '-f', cmd_name], check=False)
+                                _LOGGER.debug("Sent SIGKILL to %s processes", cmd_name)
+
+                    except Exception as e:
+                        _LOGGER.debug("Could not stop audio processes gracefully: %s", e)
+
+                # Return to wake word detection
+                await self._send_wake_detect()
+                _LOGGER.info("Interrupted - waiting for wake word")
                 return
 
             # Normal wake word detection (not interrupting)
