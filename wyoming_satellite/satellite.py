@@ -4,6 +4,7 @@ import array
 import asyncio
 import logging
 import math
+import os
 import time
 import wave
 from dataclasses import dataclass
@@ -664,8 +665,19 @@ class SatelliteBase:
     def _get_wav_duration(self, wav_path: Union[str, Path]) -> Optional[float]:
         """Get duration of a WAV file in seconds."""
         try:
+            if not os.path.exists(str(wav_path)):
+                _LOGGER.warning("WAV file does not exist: %s", wav_path)
+                return None
+
             with wave.open(str(wav_path), "rb") as wav_file:
-                return wav_file.getnframes() / wav_file.getframerate()
+                frames = wav_file.getnframes()
+                rate = wav_file.getframerate()
+                if rate == 0:
+                    _LOGGER.warning("Invalid sample rate (0) in WAV file: %s", wav_path)
+                    return None
+                duration = frames / rate
+                _LOGGER.debug("WAV file %s: %d frames, %d Hz, %.2f seconds", wav_path, frames, rate, duration)
+                return duration
         except Exception as e:
             _LOGGER.warning("Could not calculate WAV duration for %s: %s", wav_path, e)
             return None
@@ -1272,12 +1284,14 @@ class WakeStreamingSatellite(SatelliteBase):
         # Calculate awake.wav duration and set streaming delay
         if self.settings.snd.awake_wav:
             wav_duration = self._get_wav_duration(self.settings.snd.awake_wav)
-            if wav_duration is not None:
+            if wav_duration is not None and wav_duration > 0 and wav_duration < 30:  # Sanity check
                 # Add extra buffer time for Bluetooth devices
                 total_delay = wav_duration + self.settings.mic.seconds_to_mute_after_awake_wav
                 self._streaming_delay = time.monotonic() + total_delay
-                _LOGGER.debug("Set streaming delay for %s seconds (awake.wav duration)", total_delay)
+                _LOGGER.debug("Set streaming delay for %.2f seconds (awake.wav duration: %.2f + buffer: %.2f)",
+                             total_delay, wav_duration, self.settings.mic.seconds_to_mute_after_awake_wav)
             else:
+                _LOGGER.warning("Invalid or missing awake.wav, disabling streaming delay")
                 self._streaming_delay = None
         else:
             self._streaming_delay = None
