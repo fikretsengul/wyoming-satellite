@@ -1529,48 +1529,44 @@ class WakeStreamingSatellite(SatelliteBase):
                 _LOGGER.info("Wake word interrupt detected - stopping current activity")
                 self._interrupt_requested = True
 
-                # Stop any ongoing TTS playback aggressively
+                # Stop any ongoing TTS playback
                 if self._tts_playing:
-                    # Send AudioStop to the sound service
-                    await self.event_to_snd(AudioStop(timestamp=0).event())
-                    _LOGGER.debug("Sent AudioStop to interrupt TTS")
-
-                    # Kill the sound process directly via command (works for all audio devices)
-                    if self.settings.snd.command:
-                        try:
-                            import subprocess
-                            # Kill any audio playback processes to stop TTS immediately
-                            # This works for pacat, aplay, and other audio commands
-                            cmd_name = self.settings.snd.command[0].split('/')[-1]  # Get just the command name
-                            subprocess.run(['pkill', '-f', cmd_name], check=False)
-                            _LOGGER.debug("Killed %s processes to stop TTS immediately", cmd_name)
-                        except Exception as e:
-                            _LOGGER.debug("Could not kill audio processes: %s", e)
+                    # Send multiple AudioStop events to ensure TTS stops
+                    for _ in range(3):
+                        await self.event_to_snd(AudioStop(timestamp=0).event())
+                    _LOGGER.debug("Sent multiple AudioStop events to interrupt TTS")
 
                 # Stop streaming and clear state
                 self._clear_streaming_state()
 
-                # Send stop events to server and properly disconnect
+                # Send proper stop sequence to Home Assistant
                 await self.event_to_server(AudioStop(timestamp=0).event())
                 await self.trigger_streaming_stop()
 
-                # Send satellite disconnected event to inform HA we're going offline
-                from wyoming.satellite import SatelliteDisconnected
-                await self.event_to_server(SatelliteDisconnected().event())
-                _LOGGER.debug("Sent SatelliteDisconnected to Home Assistant")
+                # Send PauseSatellite to set HA state to idle
+                from wyoming.satellite import PauseSatellite
+                await self.event_to_server(PauseSatellite().event())
+                _LOGGER.debug("Sent PauseSatellite to set HA state to idle")
 
-                # Flush any pending events to ensure HA receives them
+                # Flush events and wait for HA to process
                 if self._writer:
                     try:
                         await self._writer.drain()
-                        _LOGGER.debug("Flushed events to Home Assistant")
+                        await asyncio.sleep(0.2)  # Give HA time to process
+                    except Exception:
+                        pass
+
+                # Now kill audio processes (this will cause restart)
+                if self._tts_playing and self.settings.snd.command:
+                    try:
+                        import subprocess
+                        cmd_name = self.settings.snd.command[0].split('/')[-1]
+                        subprocess.run(['pkill', '-f', cmd_name], check=False)
+                        _LOGGER.debug("Killed %s processes - satellite will restart", cmd_name)
                     except Exception as e:
-                        _LOGGER.debug("Could not flush events: %s", e)
+                        _LOGGER.debug("Could not kill audio processes: %s", e)
 
-                # Longer delay to ensure Home Assistant processes the disconnect
-                await asyncio.sleep(0.5)
-
-                _LOGGER.info("Interrupted - satellite will restart")
+                _LOGGER.info("Interrupted - satellite restarting")
                 return
 
             # Normal wake word detection (not interrupting)
