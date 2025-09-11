@@ -1529,8 +1529,11 @@ class WakeStreamingSatellite(SatelliteBase):
                 _LOGGER.info("Wake word interrupt detected - stopping current activity")
                 self._interrupt_requested = True
 
+                # Remember if TTS was playing before we clear state
+                was_tts_playing = self._tts_playing
+
                 # Stop any ongoing TTS playback
-                if self._tts_playing:
+                if was_tts_playing:
                     # Send multiple AudioStop events to ensure TTS stops
                     for _ in range(3):
                         await self.event_to_snd(AudioStop(timestamp=0).event())
@@ -1556,8 +1559,8 @@ class WakeStreamingSatellite(SatelliteBase):
                     except Exception:
                         pass
 
-                # Now kill audio processes (this will cause restart)
-                if self._tts_playing and self.settings.snd.command:
+                # Now kill audio processes if TTS was playing (this will cause restart)
+                if was_tts_playing and self.settings.snd.command:
                     try:
                         import subprocess
                         cmd_name = self.settings.snd.command[0].split('/')[-1]
