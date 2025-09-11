@@ -1296,6 +1296,7 @@ class WakeStreamingSatellite(SatelliteBase):
 
         # Delay streaming to avoid hearing awake.wav
         self._streaming_delay: Optional[float] = None
+        self._audio_start_sent = False  # Track if we've sent AudioStart to server
 
         self._wake_info: Optional[Info] = None
         self._wake_info_ready = asyncio.Event()
@@ -1305,6 +1306,7 @@ class WakeStreamingSatellite(SatelliteBase):
         self.is_streaming = False
         self._listening_timeout = None
         self._streaming_delay = None
+        self._audio_start_sent = False
 
     def _set_streaming_delays(self) -> None:
         """Set streaming delay and listening timeout after wake word detection."""
@@ -1378,7 +1380,6 @@ class WakeStreamingSatellite(SatelliteBase):
                 if remaining <= 5:  # Log when close to timeout
                     _LOGGER.debug("Listening timeout in %.1f seconds", remaining)
 
-        _LOGGER.debug("Audio forwarding allowed")
         return True
 
     async def event_from_server(self, event: Event) -> None:
@@ -1507,6 +1508,19 @@ class WakeStreamingSatellite(SatelliteBase):
             # Check if audio should be forwarded to server
             if not await self._should_forward_audio():
                 return
+
+            # Send AudioStart event if this is the first audio after delay
+            if not self._audio_start_sent:
+                chunk = AudioChunk.from_event(event)
+                audio_start = AudioStart(
+                    rate=chunk.rate,
+                    width=chunk.width,
+                    channels=chunk.channels,
+                    timestamp=chunk.timestamp
+                ).event()
+                await self.event_to_server(audio_start)
+                self._audio_start_sent = True
+                _LOGGER.debug("Sent AudioStart to server after streaming delay")
 
             # Forward to server
             await self.event_to_server(event)
