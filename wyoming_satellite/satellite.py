@@ -1550,16 +1550,25 @@ class WakeStreamingSatellite(SatelliteBase):
                 # Stop streaming and clear state
                 self._clear_streaming_state()
 
-                # Send stop events to server and set state to idle BEFORE pkill
+                # Send stop events to server and properly disconnect
                 await self.event_to_server(AudioStop(timestamp=0).event())
                 await self.trigger_streaming_stop()
 
-                # Inform Home Assistant that we're going back to idle state
-                await self._send_wake_detect()
-                _LOGGER.info("Set state to idle before restart")
+                # Send satellite disconnected event to inform HA we're going offline
+                from wyoming.satellite import SatelliteDisconnected
+                await self.event_to_server(SatelliteDisconnected().event())
+                _LOGGER.debug("Sent SatelliteDisconnected to Home Assistant")
 
-                # Small delay to ensure Home Assistant receives the state change
-                await asyncio.sleep(0.1)
+                # Flush any pending events to ensure HA receives them
+                if self._writer:
+                    try:
+                        await self._writer.drain()
+                        _LOGGER.debug("Flushed events to Home Assistant")
+                    except Exception as e:
+                        _LOGGER.debug("Could not flush events: %s", e)
+
+                # Longer delay to ensure Home Assistant processes the disconnect
+                await asyncio.sleep(0.5)
 
                 _LOGGER.info("Interrupted - satellite will restart")
                 return
