@@ -1537,40 +1537,20 @@ class WakeStreamingSatellite(SatelliteBase):
                 _LOGGER.info("Wake word interrupt detected - stopping current activity")
                 self._interrupt_requested = True
 
-                # Stop any ongoing TTS playback elegantly
-                if self._tts_playing:
-                    # Send AudioStop to the sound service
-                    await self.event_to_snd(AudioStop(timestamp=0).event())
-                    _LOGGER.debug("Sent AudioStop to interrupt TTS")
+                # Stop any ongoing activity using Wyoming protocol
+                _LOGGER.debug("Stopping current pipeline to interrupt")
 
-                    # Cancel the sound task and clear queue to stop buffered audio
-                    if self._snd_task and not self._snd_task.done():
-                        self._snd_task.cancel()
-                        _LOGGER.debug("Cancelled sound task to stop TTS")
+                # Send PauseSatellite to cleanly stop the current pipeline
+                from wyoming.satellite import PauseSatellite
+                pause_event = PauseSatellite().event()
+                await self.event_to_server(pause_event)
+                _LOGGER.debug("Sent PauseSatellite to interrupt current activity")
 
-                    # Clear the sound queue
-                    if self._snd_queue:
-                        # Clear any remaining audio events
-                        while not self._snd_queue.empty():
-                            try:
-                                self._snd_queue.get_nowait()
-                            except asyncio.QueueEmpty:
-                                break
-                        _LOGGER.debug("Cleared sound queue")
-
-                    # Reset sound service connection to flush any buffers
-                    self._snd_queue = None
-                    _LOGGER.debug("Reset sound service connection")
-
-                # Stop streaming and clear state
+                # Clear our local state
                 self._clear_streaming_state()
 
-                # Send stop events to server
-                await self.event_to_server(AudioStop(timestamp=0).event())
-                await self.trigger_streaming_stop()
-
-                # Add small delay for cleanup and let audio system settle
-                await asyncio.sleep(0.2)  # Shorter delay since we're not killing processes
+                # Very short delay to let the pause process
+                await asyncio.sleep(0.1)
 
                 # Return to wake word detection
                 await self._send_wake_detect()
