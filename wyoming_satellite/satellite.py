@@ -1550,13 +1550,18 @@ class WakeStreamingSatellite(SatelliteBase):
                 # Stop streaming and clear state
                 self._clear_streaming_state()
 
-                # Send stop events to server
+                # Send stop events to server and set state to idle BEFORE pkill
                 await self.event_to_server(AudioStop(timestamp=0).event())
                 await self.trigger_streaming_stop()
 
-                # Return to wake word detection immediately (no delay needed)
+                # Inform Home Assistant that we're going back to idle state
                 await self._send_wake_detect()
-                _LOGGER.info("Interrupted - waiting for wake word")
+                _LOGGER.info("Set state to idle before restart")
+
+                # Small delay to ensure Home Assistant receives the state change
+                await asyncio.sleep(0.1)
+
+                _LOGGER.info("Interrupted - satellite will restart")
                 return
 
             # Normal wake word detection (not interrupting)
