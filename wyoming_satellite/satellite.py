@@ -1537,21 +1537,30 @@ class WakeStreamingSatellite(SatelliteBase):
                 _LOGGER.info("Wake word interrupt detected - stopping current activity")
                 self._interrupt_requested = True
 
-                # Stop any ongoing TTS playback aggressively
+                # Stop any ongoing TTS playback elegantly
                 if self._tts_playing:
                     # Send AudioStop to the sound service
                     await self.event_to_snd(AudioStop(timestamp=0).event())
                     _LOGGER.debug("Sent AudioStop to interrupt TTS")
 
-                    # Kill the sound process directly via command
-                    if self.settings.snd.command:
-                        try:
-                            import subprocess
-                            # Kill any pacat processes to stop audio immediately
-                            subprocess.run(['pkill', '-f', 'pacat'], check=False)
-                            _LOGGER.debug("Killed pacat processes to stop TTS immediately")
-                        except Exception as e:
-                            _LOGGER.debug("Could not kill pacat processes: %s", e)
+                    # Cancel the sound task and clear queue to stop buffered audio
+                    if self._snd_task and not self._snd_task.done():
+                        self._snd_task.cancel()
+                        _LOGGER.debug("Cancelled sound task to stop TTS")
+
+                    # Clear the sound queue
+                    if self._snd_queue:
+                        # Clear any remaining audio events
+                        while not self._snd_queue.empty():
+                            try:
+                                self._snd_queue.get_nowait()
+                            except asyncio.QueueEmpty:
+                                break
+                        _LOGGER.debug("Cleared sound queue")
+
+                    # Reset sound service connection to flush any buffers
+                    self._snd_queue = None
+                    _LOGGER.debug("Reset sound service connection")
 
                 # Stop streaming and clear state
                 self._clear_streaming_state()
@@ -1560,8 +1569,8 @@ class WakeStreamingSatellite(SatelliteBase):
                 await self.event_to_server(AudioStop(timestamp=0).event())
                 await self.trigger_streaming_stop()
 
-                # Add small delay for cleanup
-                await self._add_bluetooth_delay()
+                # Add small delay for cleanup and let audio system settle
+                await asyncio.sleep(0.2)  # Shorter delay since we're not killing processes
 
                 # Return to wake word detection
                 await self._send_wake_detect()
