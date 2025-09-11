@@ -1317,8 +1317,9 @@ class WakeStreamingSatellite(SatelliteBase):
 
         # Simple built-in silence detection
         self._silence_timeout = settings.wake.silence_timeout
-        self._last_speech_time: Optional[float] = None
+        self._pipeline_start_time: Optional[float] = None
         self._silence_threshold = settings.wake.silence_threshold
+        self._speech_detected = False  # Track if any speech was detected
 
         # Cache WAV duration at startup for performance
         self._awake_wav_duration: Optional[float] = None
@@ -1354,7 +1355,7 @@ class WakeStreamingSatellite(SatelliteBase):
 
         Returns True if listening was stopped due to silence.
         """
-        if not self._pipeline_started or self._silence_timeout <= 0:
+        if not self._pipeline_started or self._silence_timeout <= 0 or self._pipeline_start_time is None:
             return False
 
         # Calculate audio level
@@ -1364,28 +1365,22 @@ class WakeStreamingSatellite(SatelliteBase):
 
         # Check if there's speech (above threshold)
         if audio_rms > self._silence_threshold:
-            self._last_speech_time = current_time
+            self._speech_detected = True
             return False
 
-        # Check for silence timeout
-        if self._last_speech_time is not None:
-            silence_duration = current_time - self._last_speech_time
-            if silence_duration >= self._silence_timeout:
-                _LOGGER.debug("Silence detected for %.1f seconds, stopping listening", silence_duration)
+        # Check for early silence timeout (before any speech is detected)
+        time_since_start = current_time - self._pipeline_start_time
 
-                # Send AudioStop to end the stream cleanly
-                await self.event_to_server(AudioStop(timestamp=chunk.timestamp).event())
+        if not self._speech_detected and time_since_start >= self._silence_timeout:
+            _LOGGER.debug("No speech detected for %.1f seconds after pipeline start, stopping listening", time_since_start)
 
-                # Clear streaming state and return to wake word detection
-                self._clear_streaming_state()
-                await self.trigger_streaming_stop()
-                await self._add_bluetooth_delay()
-                await self._send_wake_detect()
-                _LOGGER.info("Waiting for wake word")
-                return True
-        else:
-            # First audio chunk after pipeline start - initialize speech timer
-            self._last_speech_time = current_time
+            # Don't send AudioStop - just stop the pipeline to prevent STT processing
+            self._clear_streaming_state()
+            await self.trigger_streaming_stop()
+            await self._add_bluetooth_delay()
+            await self._send_wake_detect()
+            _LOGGER.info("Waiting for wake word")
+            return True
 
         return False
 
@@ -1394,7 +1389,8 @@ class WakeStreamingSatellite(SatelliteBase):
         self.is_streaming = False
         self._streaming_delay = None
         self._pipeline_started = False
-        self._last_speech_time = None
+        self._pipeline_start_time = None
+        self._speech_detected = False
 
     def _set_streaming_delays(self) -> None:
         """Set streaming delay after wake word detection."""
@@ -1551,6 +1547,7 @@ class WakeStreamingSatellite(SatelliteBase):
                     await self._send_run_pipeline(pipeline_name=getattr(self, '_pipeline_name', None))
                     await self.trigger_streaming_start()
                     self._pipeline_started = True
+                    self._pipeline_start_time = time.monotonic()
 
                     # Send AudioStart to initialize the STT stream
                     chunk = AudioChunk.from_event(event)
