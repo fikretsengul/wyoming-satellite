@@ -7,9 +7,13 @@ This document describes the fixes implemented to resolve issues with Bluetooth a
 ### 1. Voice Command Misinterpretation
 **Problem:** When using `--awake-wav` or `--done-wav` options, the satellite would not correctly understand voice commands after wake word detection.
 
-**Cause:** The microphone was being muted during awake.wav playback, causing audio loss with Bluetooth devices. Bluetooth audio streams cannot be properly paused and resumed like regular audio devices.
+**Cause:** Two issues were present:
+- The microphone was being muted during awake.wav playback, causing audio loss with Bluetooth devices
+- The satellite was immediately sending audio to the STT server, including the awake.wav sound itself
 
-**Solution:** Added automatic detection of Bluetooth devices and disabled microphone muting when Bluetooth is detected.
+**Solution:**
+- Added automatic detection of Bluetooth devices and disabled microphone muting when Bluetooth is detected
+- Implemented a streaming delay that prevents audio from being sent to the STT server until after the awake.wav has finished playing
 
 ### 2. Prolonged Listening State
 **Problem:** The LED indicator would remain on for an extended period after finishing speaking.
@@ -27,6 +31,16 @@ This document describes the fixes implemented to resolve issues with Bluetooth a
 - Added a listening timeout to prevent indefinite listening states
 - Added a small delay for Bluetooth devices to reset properly between conversations
 - Maintained continuous audio stream to wake service for reliable detection
+
+### 4. Satellite Hearing Its Own Awake Sound
+**Problem:** The satellite would hear its own awake.wav announcement ("I'm listening") and include it in the voice command sent to STT.
+
+**Cause:** Audio was being forwarded to the STT server immediately after wake word detection, before the awake.wav finished playing.
+
+**Solution:**
+- Calculate the duration of the awake.wav file when wake word is detected
+- Delay forwarding audio to the STT server until after the awake.wav has finished
+- Audio continues to be received from the microphone to keep the wake service active
 
 ## New Command-Line Options
 
@@ -84,6 +98,13 @@ WantedBy=default.target
 ### Bluetooth Detection
 The system now automatically detects Bluetooth devices by looking for "bluez_" in the microphone command. When detected, it disables microphone muting to prevent audio loss.
 
+### Streaming Delay
+When wake word is detected and an awake.wav is configured:
+1. The system calculates the duration of the awake.wav file
+2. Audio continues to be received from the microphone (keeping wake service active)
+3. Audio is NOT forwarded to the STT server until after the awake.wav duration has passed
+4. This prevents the satellite from hearing its own "I'm listening" announcement
+
 ### Listening Timeout
 After wake word detection, the satellite will listen for a maximum of the configured timeout period. If no speech-to-text result is received within this time, it automatically returns to wake word detection mode.
 
@@ -102,9 +123,15 @@ The wake word service maintains a continuous audio stream for proper detection:
 
 2. Test wake word detection multiple times to ensure it doesn't get stuck
 
-3. Verify that voice commands are correctly recognized after the awake sound plays
+3. Say the wake word and wait for the awake sound to finish before speaking your command
+   - The satellite will NOT process audio during the awake sound
+   - Your voice command will only be processed after the awake sound completes
 
-4. Check that the listening indicator turns off promptly after speaking
+4. Verify that voice commands are correctly recognized without hearing the awake sound in the STT
+
+5. Check that the listening indicator turns off promptly after speaking
+
+6. Confirm you can trigger the wake word multiple times in succession
 
 ## Troubleshooting
 
@@ -128,9 +155,22 @@ If you still experience issues:
    journalctl -u wyoming-satellite -f
    ```
 
+## Code Quality
+
+The implementation has been refactored to follow DRY (Don't Repeat Yourself) principles:
+- Created reusable helper functions for common operations
+- Eliminated approximately 80+ lines of duplicated code
+- Improved maintainability and readability
+- See `REFACTORING_SUMMARY.md` for detailed refactoring information
+
 ## Additional Notes
 
 - The fixes are designed to be backward compatible with non-Bluetooth devices
 - The automatic Bluetooth detection can be overridden with the `--mic-bluetooth-no-mute` flag
 - The listening timeout prevents the satellite from getting stuck indefinitely
 - The wake word refractory period still applies to prevent multiple rapid detections
+- **Important:** When using awake.wav with Bluetooth devices:
+  - The satellite will wait for the awake sound to finish before processing your voice
+  - Speak your command AFTER the awake sound completes
+  - This prevents the satellite from hearing its own announcements
+  - The delay is automatically calculated based on the WAV file duration
