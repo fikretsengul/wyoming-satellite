@@ -662,52 +662,91 @@ class SatelliteBase:
 
         return False
 
-    def _get_wav_duration(self, wav_path: Union[str, Path]) -> Optional[float]:
-        """Get duration of a WAV file in seconds using multiple methods."""
+    def _get_wav_duration_precise(self, wav_path: Union[str, Path]) -> Optional[float]:
+        """Get precise duration of a WAV file using multiple methods."""
         if not os.path.exists(str(wav_path)):
             _LOGGER.warning("WAV file does not exist: %s", wav_path)
             return None
 
-        # Method 1: Try using wave module
+        # Method 1: Parse WAV header manually for more reliable results
+        try:
+            with open(str(wav_path), 'rb') as f:
+                # Read WAV header
+                riff = f.read(4)  # "RIFF"
+                if riff != b'RIFF':
+                    raise ValueError("Not a valid WAV file")
+
+                file_size = int.from_bytes(f.read(4), 'little')
+                wave_header = f.read(4)  # "WAVE"
+                if wave_header != b'WAVE':
+                    raise ValueError("Not a valid WAV file")
+
+                # Find fmt chunk
+                while True:
+                    chunk_id = f.read(4)
+                    if not chunk_id:
+                        break
+                    chunk_size = int.from_bytes(f.read(4), 'little')
+
+                    if chunk_id == b'fmt ':
+                        # Read format data
+                        fmt_data = f.read(chunk_size)
+                        if len(fmt_data) >= 16:
+                            audio_format = int.from_bytes(fmt_data[0:2], 'little')
+                            channels = int.from_bytes(fmt_data[2:4], 'little')
+                            sample_rate = int.from_bytes(fmt_data[4:8], 'little')
+                            byte_rate = int.from_bytes(fmt_data[8:12], 'little')
+                            block_align = int.from_bytes(fmt_data[12:14], 'little')
+                            bits_per_sample = int.from_bytes(fmt_data[14:16], 'little')
+
+                            # Validate format
+                            if sample_rate > 0 and sample_rate <= 192000 and channels > 0 and bits_per_sample > 0:
+                                # Find data chunk
+                                f.seek(12)  # Reset to after WAVE header
+                                while True:
+                                    chunk_id = f.read(4)
+                                    if not chunk_id:
+                                        break
+                                    chunk_size = int.from_bytes(f.read(4), 'little')
+
+                                    if chunk_id == b'data':
+                                        # Calculate duration
+                                        bytes_per_sample = bits_per_sample // 8
+                                        total_samples = chunk_size // (bytes_per_sample * channels)
+                                        duration = total_samples / sample_rate
+
+                                        if 0.1 <= duration <= 30:
+                                            _LOGGER.debug("WAV file %s: %d samples, %d Hz, %.3f seconds (manual parse)",
+                                                         wav_path, total_samples, sample_rate, duration)
+                                            return duration
+                                        break
+                                    else:
+                                        f.seek(chunk_size, 1)  # Skip chunk
+                            break
+                    else:
+                        f.seek(chunk_size, 1)  # Skip chunk
+
+        except Exception as e:
+            _LOGGER.debug("Manual WAV parsing failed for %s: %s", wav_path, e)
+
+        # Method 2: Try wave module as fallback
         try:
             with wave.open(str(wav_path), "rb") as wav_file:
                 frames = wav_file.getnframes()
                 rate = wav_file.getframerate()
 
-                # Check if values are reasonable
                 if rate > 0 and rate <= 192000 and frames > 0 and frames <= 100000000:
                     duration = frames / rate
-                    if 0.1 <= duration <= 30:  # Reasonable duration for awake sound
-                        _LOGGER.debug("WAV file %s: %d frames, %d Hz, %.2f seconds (wave module)",
+                    if 0.1 <= duration <= 30:
+                        _LOGGER.debug("WAV file %s: %d frames, %d Hz, %.3f seconds (wave module)",
                                      wav_path, frames, rate, duration)
                         return duration
-                    else:
-                        _LOGGER.debug("WAV duration %.2f seconds seems unreasonable, trying fallback", duration)
-                else:
-                    _LOGGER.debug("WAV metadata seems invalid (frames=%d, rate=%d), trying fallback", frames, rate)
         except Exception as e:
-            _LOGGER.debug("Wave module failed for %s: %s, trying fallback", wav_path, e)
+            _LOGGER.debug("Wave module failed for %s: %s", wav_path, e)
 
-        # Method 2: Fallback - estimate based on file size
-        try:
-            file_size = os.path.getsize(str(wav_path))
-            # Rough estimate: assume 16-bit, 22050 Hz, mono
-            # File size includes headers, so subtract ~44 bytes for WAV header
-            audio_bytes = max(0, file_size - 100)  # Conservative header size
-            estimated_duration = audio_bytes / (2 * 22050)  # 2 bytes per sample, 22050 samples per second
-
-            if 0.1 <= estimated_duration <= 30:
-                _LOGGER.debug("WAV file %s: estimated %.2f seconds based on file size (%d bytes)",
-                             wav_path, estimated_duration, file_size)
-                return estimated_duration
-            else:
-                _LOGGER.debug("File size estimation gave unreasonable duration: %.2f seconds", estimated_duration)
-        except Exception as e:
-            _LOGGER.debug("File size estimation failed for %s: %s", wav_path, e)
-
-        # Method 3: Use a fixed reasonable default
-        _LOGGER.warning("Could not determine WAV duration for %s, using default 2 seconds", wav_path)
-        return 2.0  # Default to 2 seconds - reasonable for most awake sounds
+        # Method 3: Use a reasonable default
+        _LOGGER.warning("Could not determine WAV duration for %s, using default 1.5 seconds", wav_path)
+        return 1.5  # Conservative default
 
     async def _play_wav(
         self, wav_path: Optional[Union[str, Path]], mute_microphone: bool = False
@@ -1294,6 +1333,13 @@ class WakeStreamingSatellite(SatelliteBase):
         self._streaming_delay: Optional[float] = None
         self._pipeline_started = False  # Track if we've sent RunPipeline to server
 
+        # Cache WAV duration at startup for performance
+        self._awake_wav_duration: Optional[float] = None
+        if settings.snd.awake_wav:
+            self._awake_wav_duration = self._get_wav_duration_precise(settings.snd.awake_wav)
+            if self._awake_wav_duration:
+                _LOGGER.info("Cached awake.wav duration: %.3f seconds", self._awake_wav_duration)
+
         self._wake_info: Optional[Info] = None
         self._wake_info_ready = asyncio.Event()
 
@@ -1305,19 +1351,12 @@ class WakeStreamingSatellite(SatelliteBase):
 
     def _set_streaming_delays(self) -> None:
         """Set streaming delay after wake word detection."""
-        # Calculate awake.wav duration and set streaming delay
-        if self.settings.snd.awake_wav:
-            wav_duration = self._get_wav_duration(self.settings.snd.awake_wav)
-            if wav_duration is not None and wav_duration > 0:
-                # Just use the WAV duration - no extra delays needed since we're staying idle
-                total_delay = wav_duration
-                self._streaming_delay = time.monotonic() + total_delay
-                _LOGGER.info("Streaming delay enabled: %.2f seconds (awake.wav duration)", total_delay)
-            else:
-                _LOGGER.warning("Could not determine awake.wav duration, disabling streaming delay")
-                self._streaming_delay = None
+        # Use cached awake.wav duration
+        if self._awake_wav_duration is not None and self._awake_wav_duration > 0:
+            self._streaming_delay = time.monotonic() + self._awake_wav_duration
+            _LOGGER.info("Streaming delay enabled: %.3f seconds (exact awake.wav duration)", self._awake_wav_duration)
         else:
-            _LOGGER.debug("No awake.wav configured, streaming delay disabled")
+            _LOGGER.debug("No awake.wav duration available, streaming delay disabled")
             self._streaming_delay = None
 
     async def _add_bluetooth_delay(self) -> None:
@@ -1462,11 +1501,20 @@ class WakeStreamingSatellite(SatelliteBase):
                     await self.trigger_streaming_start()
                     self._pipeline_started = True
 
-            # If pipeline not started yet (still in delay), don't forward audio
+                    # Send AudioStart to initialize the STT stream
+                    chunk = AudioChunk.from_event(event)
+                    audio_start = AudioStart(
+                        rate=chunk.rate,
+                        width=chunk.width,
+                        channels=chunk.channels,
+                        timestamp=chunk.timestamp
+                    ).event()
+                    await self.event_to_server(audio_start)
+                    _LOGGER.debug("Sent AudioStart to server after delay")
+
+            # If pipeline not started yet (still in delay), don't forward audio at all
             if not self._pipeline_started:
-                remaining = self._streaming_delay - time.monotonic() if self._streaming_delay else 0
-                if remaining > 1.0:  # Only log if more than 1 second remaining
-                    _LOGGER.debug("Pipeline not started yet (%.1f seconds remaining)", remaining)
+                # Still in delay period - completely ignore audio to prevent buffering awake.wav
                 return
 
             # Forward audio to server (pipeline is running)
