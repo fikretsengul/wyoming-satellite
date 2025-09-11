@@ -672,9 +672,16 @@ class SatelliteBase:
             with wave.open(str(wav_path), "rb") as wav_file:
                 frames = wav_file.getnframes()
                 rate = wav_file.getframerate()
-                if rate == 0:
-                    _LOGGER.warning("Invalid sample rate (0) in WAV file: %s", wav_path)
+
+                # Check for corrupted/invalid WAV files
+                if rate == 0 or rate > 192000:  # Unreasonable sample rate
+                    _LOGGER.warning("Invalid sample rate (%d Hz) in WAV file: %s", rate, wav_path)
                     return None
+
+                if frames <= 0 or frames > 100000000:  # More than reasonable for a short sound
+                    _LOGGER.warning("Invalid frame count (%d) in WAV file: %s - file may be corrupted", frames, wav_path)
+                    return None
+
                 duration = frames / rate
                 _LOGGER.debug("WAV file %s: %d frames, %d Hz, %.2f seconds", wav_path, frames, rate, duration)
                 return duration
@@ -1313,10 +1320,14 @@ class WakeStreamingSatellite(SatelliteBase):
         - We're still in the awake.wav delay period
         - The listening timeout has been reached
         """
+        current_time = time.monotonic()
+
         # Check if we're still in the delay period (awake.wav playing)
         if self._streaming_delay is not None:
-            if time.monotonic() < self._streaming_delay:
+            if current_time < self._streaming_delay:
                 # Still playing awake.wav, don't forward audio to server
+                _LOGGER.debug("Still in streaming delay period (%.2f seconds remaining)",
+                             self._streaming_delay - current_time)
                 return False
             else:
                 # Delay period is over, clear it
@@ -1325,7 +1336,7 @@ class WakeStreamingSatellite(SatelliteBase):
 
         # Check for listening timeout
         if self._listening_timeout is not None:
-            if time.monotonic() > self._listening_timeout:
+            if current_time > self._listening_timeout:
                 _LOGGER.warning("Listening timeout reached, stopping stream")
                 self._clear_streaming_state()
 
@@ -1341,7 +1352,12 @@ class WakeStreamingSatellite(SatelliteBase):
                 await self._send_wake_detect()
                 _LOGGER.info("Waiting for wake word")
                 return False
+            else:
+                remaining = self._listening_timeout - current_time
+                if remaining <= 5:  # Log when close to timeout
+                    _LOGGER.debug("Listening timeout in %.1f seconds", remaining)
 
+        _LOGGER.debug("Audio forwarding allowed")
         return True
 
     async def event_from_server(self, event: Event) -> None:
