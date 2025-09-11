@@ -298,13 +298,19 @@ class SatelliteBase:
             _LOGGER.debug("Server detected voice stopped")
             await self.trigger_stt_stop()
         elif Transcript.is_type(event.type):
-            # STT text
-            _LOGGER.debug(event)
-            await self.trigger_transcript(Transcript.from_event(event))
+            # STT text - only process if we're still streaming
+            if self.is_streaming:
+                _LOGGER.debug(event)
+                await self.trigger_transcript(Transcript.from_event(event))
+            else:
+                _LOGGER.debug("Ignoring transcript - already stopped listening: %s", event)
         elif Synthesize.is_type(event.type):
-            # TTS request
-            _LOGGER.debug(event)
-            await self.trigger_synthesize(Synthesize.from_event(event))
+            # TTS request - only process if we're still streaming
+            if self.is_streaming:
+                _LOGGER.debug(event)
+                await self.trigger_synthesize(Synthesize.from_event(event))
+            else:
+                _LOGGER.debug("Ignoring TTS request - already stopped listening: %s", event)
         elif Error.is_type(event.type):
             _LOGGER.warning(event)
             await self.trigger_error(Error.from_event(event))
@@ -1362,19 +1368,21 @@ class WakeStreamingSatellite(SatelliteBase):
         chunk = AudioChunk.from_event(event)
         audio_rms = self._calculate_audio_rms(chunk.audio)
         current_time = time.monotonic()
+        time_since_start = current_time - self._pipeline_start_time
 
         # Check if there's speech (above threshold)
         if audio_rms > self._silence_threshold:
             self._speech_detected = True
             return False
 
-        # Check for early silence timeout (before any speech is detected)
-        time_since_start = current_time - self._pipeline_start_time
-
+        # If no speech detected within timeout, stop immediately
         if not self._speech_detected and time_since_start >= self._silence_timeout:
-            _LOGGER.debug("No speech detected for %.1f seconds after pipeline start, stopping listening", time_since_start)
+            _LOGGER.debug("No speech detected for %.1f seconds, stopping listening immediately", time_since_start)
 
-            # Don't send AudioStop - just stop the pipeline to prevent STT processing
+            # Send AudioStop immediately to cancel any pending STT processing
+            await self.event_to_server(AudioStop(timestamp=chunk.timestamp).event())
+
+            # Clear streaming state and return to wake word detection
             self._clear_streaming_state()
             await self.trigger_streaming_stop()
             await self._add_bluetooth_delay()
