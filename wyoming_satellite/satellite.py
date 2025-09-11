@@ -1537,20 +1537,31 @@ class WakeStreamingSatellite(SatelliteBase):
                 _LOGGER.info("Wake word interrupt detected - stopping current activity")
                 self._interrupt_requested = True
 
-                # Stop any ongoing activity using Wyoming protocol
-                _LOGGER.debug("Stopping current pipeline to interrupt")
+                # Stop any ongoing TTS playback aggressively
+                if self._tts_playing:
+                    # Send AudioStop to the sound service
+                    await self.event_to_snd(AudioStop(timestamp=0).event())
+                    _LOGGER.debug("Sent AudioStop to interrupt TTS")
 
-                # Send PauseSatellite to cleanly stop the current pipeline
-                from wyoming.satellite import PauseSatellite
-                pause_event = PauseSatellite().event()
-                await self.event_to_server(pause_event)
-                _LOGGER.debug("Sent PauseSatellite to interrupt current activity")
+                    # Kill the sound process directly via command
+                    if self.settings.snd.command:
+                        try:
+                            import subprocess
+                            # Kill any pacat processes to stop audio immediately
+                            subprocess.run(['pkill', '-f', 'pacat'], check=False)
+                            _LOGGER.debug("Killed pacat processes to stop TTS immediately")
+                        except Exception as e:
+                            _LOGGER.debug("Could not kill pacat processes: %s", e)
 
-                # Clear our local state
+                # Stop streaming and clear state
                 self._clear_streaming_state()
 
-                # Very short delay to let the pause process
-                await asyncio.sleep(0.1)
+                # Send stop events to server
+                await self.event_to_server(AudioStop(timestamp=0).event())
+                await self.trigger_streaming_stop()
+
+                # Add small delay for cleanup
+                await self._add_bluetooth_delay()
 
                 # Return to wake word detection
                 await self._send_wake_detect()
