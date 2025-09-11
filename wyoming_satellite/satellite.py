@@ -1370,14 +1370,22 @@ class WakeStreamingSatellite(SatelliteBase):
         current_time = time.monotonic()
         time_since_start = current_time - self._pipeline_start_time
 
+        # Debug: Log audio levels occasionally
+        if int(time_since_start * 10) % 10 == 0:  # Every second
+            _LOGGER.debug("Audio RMS: %.4f, Time since start: %.1fs, Speech detected: %s",
+                         audio_rms, time_since_start, self._speech_detected)
+
         # Check if there's speech (above threshold)
         if audio_rms > self._silence_threshold:
+            if not self._speech_detected:
+                _LOGGER.debug("Speech detected! RMS: %.4f > threshold: %.4f", audio_rms, self._silence_threshold)
             self._speech_detected = True
             return False
 
         # If no speech detected within timeout, stop immediately
         if not self._speech_detected and time_since_start >= self._silence_timeout:
-            _LOGGER.debug("No speech detected for %.1f seconds, stopping listening immediately", time_since_start)
+            _LOGGER.info("No speech detected for %.1f seconds (RMS: %.4f), stopping listening immediately",
+                        time_since_start, audio_rms)
 
             # Send AudioStop immediately to cancel any pending STT processing
             await self.event_to_server(AudioStop(timestamp=chunk.timestamp).event())
@@ -1649,6 +1657,8 @@ class WakeStreamingSatellite(SatelliteBase):
             if self._streaming_delay is None:
                 await self._send_run_pipeline(pipeline_name=pipeline_name)
                 self._pipeline_started = True
+                self._pipeline_start_time = time.monotonic()
+                _LOGGER.debug("Pipeline started immediately (no awake.wav delay)")
             else:
                 _LOGGER.debug("Delaying RunPipeline until after awake.wav (%.1f seconds)",
                              self._streaming_delay - time.monotonic())
