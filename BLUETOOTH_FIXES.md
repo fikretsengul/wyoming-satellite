@@ -24,9 +24,9 @@ This document describes the fixes implemented to resolve issues with Bluetooth a
 **Cause:** The wake word service wasn't properly resetting after detection, and Bluetooth audio buffering could cause issues with the wake word detection pipeline.
 
 **Solution:**
-- Added proper cleanup of the wake word service after detection
-- Added a small delay for Bluetooth devices to reset properly
-- Clear any buffered audio in the wake service to prevent false detections
+- Added a listening timeout to prevent indefinite listening states
+- Added a small delay for Bluetooth devices to reset properly between conversations
+- Maintained continuous audio stream to wake service for reliable detection
 
 ## New Command-Line Options
 
@@ -88,10 +88,10 @@ The system now automatically detects Bluetooth devices by looking for "bluez_" i
 After wake word detection, the satellite will listen for a maximum of the configured timeout period. If no speech-to-text result is received within this time, it automatically returns to wake word detection mode.
 
 ### Wake Service Reset
-The wake word service is properly reset after each detection by:
-1. Sending an AudioStop event to clear buffers
-2. Adding a small delay for Bluetooth devices
-3. Properly reinitializing the detection pipeline
+The wake word service maintains a continuous audio stream for proper detection:
+1. Wake service continues to receive audio throughout the conversation
+2. A small delay is added for Bluetooth devices after conversation ends
+3. The detection pipeline is properly reinitialized with _send_wake_detect()
 
 ## Testing the Fixes
 

@@ -1416,13 +1416,8 @@ class WakeStreamingSatellite(SatelliteBase):
             if (refractory_timestamp is not None) and (
                 refractory_timestamp > time.monotonic()
             ):
-                _LOGGER.debug("Wake word detection occurred during refractory period")
-                return
-
-            # Clear any buffered audio in the wake service to prevent false detections
-            # This is especially important for Bluetooth devices
-            await self.event_to_wake(AudioStop(timestamp=0).event())
-            await asyncio.sleep(0.1)  # Small delay to ensure wake service processes the stop
+            _LOGGER.debug("Wake word detection occurred during refractory period")
+            return
 
             # Stop debug recording (wake)
             if self.wake_audio_writer is not None:
