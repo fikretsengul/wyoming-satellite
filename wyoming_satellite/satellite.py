@@ -275,10 +275,14 @@ class SatelliteBase:
             forward_event = False
         elif AudioStart.is_type(event.type):
             # TTS started
+            self._tts_playing = True
+            _LOGGER.debug("TTS playback started")
             await self.event_to_snd(event)
             await self.trigger_tts_start()
         elif AudioStop.is_type(event.type):
             # TTS stopped
+            self._tts_playing = False
+            _LOGGER.debug("TTS playback stopped")
             await self.event_to_snd(event)
             await self.trigger_tts_stop()
         elif Detect.is_type(event.type):
@@ -301,6 +305,8 @@ class SatelliteBase:
             await self.trigger_transcript(Transcript.from_event(event))
         elif Synthesize.is_type(event.type):
             # TTS request
+            self._tts_playing = True  # TTS will start soon
+            _LOGGER.debug("TTS synthesis started")
             _LOGGER.debug(event)
             await self.trigger_synthesize(Synthesize.from_event(event))
         elif Error.is_type(event.type):
@@ -1313,6 +1319,9 @@ class WakeStreamingSatellite(SatelliteBase):
         self._streaming_delay: Optional[float] = None
         self._pipeline_started = False  # Track if we've sent RunPipeline to server
 
+        # Track TTS state for wake word interruption
+        self._tts_playing = False
+
         # Cache WAV duration at startup for performance
         self._awake_wav_duration: Optional[float] = None
         if settings.snd.awake_wav:
@@ -1328,6 +1337,7 @@ class WakeStreamingSatellite(SatelliteBase):
         self.is_streaming = False
         self._streaming_delay = None
         self._pipeline_started = False
+        self._tts_playing = False
 
     def _set_streaming_delays(self) -> None:
         """Set streaming delay after wake word detection."""
@@ -1513,11 +1523,37 @@ class WakeStreamingSatellite(SatelliteBase):
             self._wake_info_ready.set()
             return
 
-        if self.is_streaming or (self.server_id is None):
-            # Not detecting or no server connected
-            return
-
         if Detection.is_type(event.type):
+            detection = Detection.from_event(event)
+
+            # Check if we should interrupt ongoing activity
+            if self.is_streaming or self._tts_playing:
+                _LOGGER.info("Wake word interrupt detected - stopping current activity")
+
+                # Stop any ongoing TTS playback
+                if self._tts_playing:
+                    await self.event_to_snd(AudioStop(timestamp=0).event())
+                    _LOGGER.debug("Sent AudioStop to interrupt TTS")
+
+                # Stop streaming and clear state
+                self._clear_streaming_state()
+
+                # Send stop events to server
+                await self.event_to_server(AudioStop(timestamp=0).event())
+                await self.trigger_streaming_stop()
+
+                # Add small delay for cleanup
+                await self._add_bluetooth_delay()
+
+                # Return to wake word detection
+                await self._send_wake_detect()
+                _LOGGER.info("Interrupted - waiting for wake word")
+                return
+
+            # Normal wake word detection (not interrupting)
+            if self.server_id is None:
+                # No server connected
+                return
             detection = Detection.from_event(event)
 
             # Check refractory period to avoid multiple back-to-back detections
