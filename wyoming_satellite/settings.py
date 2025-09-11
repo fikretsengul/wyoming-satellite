@@ -134,12 +134,6 @@ class WakeSettings(ServiceSettings):
     refractory_seconds: Optional[float] = 5.0
     """Seconds after a wake word detection before another detection is handled."""
 
-    silence_timeout: float = 2.0
-    """Seconds of silence before automatically stopping listening (0 to disable)."""
-
-    silence_threshold: float = 0.01
-    """Audio RMS threshold for silence detection (0.0-1.0)."""
-
 
 @dataclass(frozen=True)
 class VadSettings:

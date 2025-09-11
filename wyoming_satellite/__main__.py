@@ -156,18 +156,6 @@ async def main() -> None:
         default=5.0,
         help="Seconds after a wake word detection before another detection is handled (default: 5)",
     )
-    parser.add_argument(
-        "--wake-silence-timeout",
-        type=float,
-        default=2.0,
-        help="Seconds of silence before automatically stopping listening (default: 2.0, 0 to disable)",
-    )
-    parser.add_argument(
-        "--wake-silence-threshold",
-        type=float,
-        default=0.01,
-        help="Audio RMS threshold for silence detection (0.0-1.0, default: 0.01)",
-    )
 
     # Voice activity detector
     parser.add_argument(
@@ -404,8 +392,6 @@ async def main() -> None:
                 if args.wake_refractory_seconds > 0
                 else None
             ),
-            silence_timeout=args.wake_silence_timeout,
-            silence_threshold=args.wake_silence_threshold,
         ),
         snd=SndSettings(
             uri=args.snd_uri,
