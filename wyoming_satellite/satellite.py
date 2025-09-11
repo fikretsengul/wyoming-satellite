@@ -1333,8 +1333,12 @@ class WakeStreamingSatellite(SatelliteBase):
         """Set streaming delay after wake word detection."""
         # Use cached awake.wav duration
         if self._awake_wav_duration is not None and self._awake_wav_duration > 0:
-            self._streaming_delay = time.monotonic() + self._awake_wav_duration
-            _LOGGER.info("Streaming delay enabled: %.3f seconds (exact awake.wav duration)", self._awake_wav_duration)
+            # Add acoustic echo buffer for Bluetooth devices to prevent hearing awake.wav echo
+            echo_buffer = 0.75 if self._is_bluetooth_device() else 0.25
+            total_delay = self._awake_wav_duration + echo_buffer
+            self._streaming_delay = time.monotonic() + total_delay
+            _LOGGER.info("Streaming delay enabled: %.3f seconds (awake.wav: %.3f + echo buffer: %.2f)",
+                        total_delay, self._awake_wav_duration, echo_buffer)
         else:
             _LOGGER.debug("No awake.wav duration available, streaming delay disabled")
             self._streaming_delay = None
