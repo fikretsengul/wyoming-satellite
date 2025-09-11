@@ -1296,8 +1296,7 @@ class WakeStreamingSatellite(SatelliteBase):
 
         # Delay streaming to avoid hearing awake.wav
         self._streaming_delay: Optional[float] = None
-        self._audio_start_sent = False  # Track if we've sent AudioStart to server
-        self._audio_buffer: List[Event] = []  # Buffer audio during delay period
+        self._pipeline_started = False  # Track if we've sent RunPipeline to server
 
         self._wake_info: Optional[Info] = None
         self._wake_info_ready = asyncio.Event()
@@ -1307,8 +1306,7 @@ class WakeStreamingSatellite(SatelliteBase):
         self.is_streaming = False
         self._listening_timeout = None
         self._streaming_delay = None
-        self._audio_start_sent = False
-        self._audio_buffer.clear()
+        self._pipeline_started = False
 
     def _set_streaming_delays(self) -> None:
         """Set streaming delay and listening timeout after wake word detection."""
@@ -1430,9 +1428,12 @@ class WakeStreamingSatellite(SatelliteBase):
         # Don't set refractory period for server commands.
         # Don't forward the detection event back to the server.
         # No pipeline name matching needed, the server already knows.
+
+        # Server detections don't need delay (no awake.wav)
         await self._send_run_pipeline()
         await self.forward_event(detection.event())  # forward to event service
         await self.trigger_streaming_start()
+        self._pipeline_started = True
 
     async def trigger_server_disonnected(self) -> None:
         await super().trigger_server_disonnected()
@@ -1468,38 +1469,21 @@ class WakeStreamingSatellite(SatelliteBase):
                 self.stt_audio_writer.write(audio_bytes)
 
         if self.is_streaming:
-            # Check if we're still in delay period
-            if self._streaming_delay is not None and time.monotonic() < self._streaming_delay:
-                # Buffer audio during delay period
-                self._audio_buffer.append(event)
-                remaining = self._streaming_delay - time.monotonic()
-                if remaining > 1.0:  # Only log if more than 1 second remaining
-                    _LOGGER.debug("Buffering audio during delay (%.1f seconds remaining)", remaining)
-                return
-
-            # Delay period ended - send buffered audio and start normal streaming
-            if self._streaming_delay is not None:
+            # Check if we need to start the pipeline after delay
+            if self._streaming_delay is not None and time.monotonic() >= self._streaming_delay:
                 self._streaming_delay = None
-                _LOGGER.debug("Streaming delay ended, processing %d buffered audio chunks", len(self._audio_buffer))
+                if not self._pipeline_started:
+                    _LOGGER.debug("Streaming delay ended, starting pipeline now")
+                    await self._send_run_pipeline(pipeline_name=getattr(self, '_pipeline_name', None))
+                    await self.trigger_streaming_start()
+                    self._pipeline_started = True
 
-                # Send AudioStart first
-                if self._audio_buffer:
-                    first_chunk = AudioChunk.from_event(self._audio_buffer[0])
-                    audio_start = AudioStart(
-                        rate=first_chunk.rate,
-                        width=first_chunk.width,
-                        channels=first_chunk.channels,
-                        timestamp=first_chunk.timestamp
-                    ).event()
-                    await self.event_to_server(audio_start)
-                    self._audio_start_sent = True
-                    _LOGGER.debug("Sent AudioStart to server")
-
-                # Send all buffered audio
-                for buffered_event in self._audio_buffer:
-                    await self.event_to_server(buffered_event)
-
-                self._audio_buffer.clear()
+            # If pipeline not started yet (still in delay), don't forward audio
+            if not self._pipeline_started:
+                remaining = self._streaming_delay - time.monotonic() if self._streaming_delay else 0
+                if remaining > 1.0:  # Only log if more than 1 second remaining
+                    _LOGGER.debug("Pipeline not started yet (%.1f seconds remaining)", remaining)
+                return
 
             # Check for listening timeout
             if self._listening_timeout is not None:
@@ -1524,20 +1508,7 @@ class WakeStreamingSatellite(SatelliteBase):
                     if remaining <= 5:  # Log when close to timeout
                         _LOGGER.debug("Listening timeout in %.1f seconds", remaining)
 
-            # Send AudioStart if this is the first audio after delay (fallback)
-            if not self._audio_start_sent:
-                chunk = AudioChunk.from_event(event)
-                audio_start = AudioStart(
-                    rate=chunk.rate,
-                    width=chunk.width,
-                    channels=chunk.channels,
-                    timestamp=chunk.timestamp
-                ).event()
-                await self.event_to_server(audio_start)
-                self._audio_start_sent = True
-                _LOGGER.debug("Sent AudioStart to server (fallback)")
-
-            # Forward current audio to server
+            # Forward audio to server (pipeline is running)
             await self.event_to_server(event)
         else:
             # Forward to wake word service
@@ -1602,10 +1573,23 @@ class WakeStreamingSatellite(SatelliteBase):
                         pipeline_name = wake_name.pipeline
                         break
 
-            await self._send_run_pipeline(pipeline_name=pipeline_name)
+            # Store pipeline name for later use
+            self._pipeline_name = pipeline_name
+
+            # If no streaming delay, start pipeline immediately
+            if self._streaming_delay is None:
+                await self._send_run_pipeline(pipeline_name=pipeline_name)
+                self._pipeline_started = True
+            else:
+                _LOGGER.debug("Delaying RunPipeline until after awake.wav (%.1f seconds)",
+                             self._streaming_delay - time.monotonic())
+
             await self.forward_event(event)  # forward to event service
             await self.trigger_detection(Detection.from_event(event))
-            await self.trigger_streaming_start()
+
+            # Only trigger streaming start if pipeline is started
+            if self._pipeline_started:
+                await self.trigger_streaming_start()
 
     async def update_info(self, info: Info) -> None:
         self._wake_info = None
