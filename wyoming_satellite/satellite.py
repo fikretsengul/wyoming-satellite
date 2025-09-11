@@ -1416,8 +1416,8 @@ class WakeStreamingSatellite(SatelliteBase):
             if (refractory_timestamp is not None) and (
                 refractory_timestamp > time.monotonic()
             ):
-            _LOGGER.debug("Wake word detection occurred during refractory period")
-            return
+                _LOGGER.debug("Wake word detection occurred during refractory period")
+                return
 
             # Stop debug recording (wake)
             if self.wake_audio_writer is not None:
