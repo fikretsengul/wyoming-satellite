@@ -1359,11 +1359,6 @@ class WakeStreamingSatellite(SatelliteBase):
             _LOGGER.debug("No awake.wav duration available, streaming delay disabled")
             self._streaming_delay = None
 
-    async def _add_bluetooth_delay(self) -> None:
-        """Add a delay for Bluetooth devices to reset properly."""
-        if self._is_bluetooth_device():
-            _LOGGER.debug("Adding delay for Bluetooth device reset")
-            await asyncio.sleep(0.5)
 
 
     async def event_from_server(self, event: Event) -> None:
@@ -1415,9 +1410,6 @@ class WakeStreamingSatellite(SatelliteBase):
 
                 # It's possible to be paused in the middle of streaming
                 if not self._is_paused:
-                    # Add a small delay for Bluetooth devices to reset properly
-                    await self._add_bluetooth_delay()
-
                     await self._send_wake_detect()
                     _LOGGER.info("Waiting for wake word")
 
@@ -1543,15 +1535,17 @@ class WakeStreamingSatellite(SatelliteBase):
                     await self.event_to_snd(AudioStop(timestamp=0).event())
                     _LOGGER.debug("Sent AudioStop to interrupt TTS")
 
-                    # Kill the sound process directly via command
+                    # Kill the sound process directly via command (works for all audio devices)
                     if self.settings.snd.command:
                         try:
                             import subprocess
-                            # Kill any pacat processes to stop audio immediately
-                            subprocess.run(['pkill', '-f', 'pacat'], check=False)
-                            _LOGGER.debug("Killed pacat processes to stop TTS immediately")
+                            # Kill any audio playback processes to stop TTS immediately
+                            # This works for pacat, aplay, and other audio commands
+                            cmd_name = self.settings.snd.command[0].split('/')[-1]  # Get just the command name
+                            subprocess.run(['pkill', '-f', cmd_name], check=False)
+                            _LOGGER.debug("Killed %s processes to stop TTS immediately", cmd_name)
                         except Exception as e:
-                            _LOGGER.debug("Could not kill pacat processes: %s", e)
+                            _LOGGER.debug("Could not kill audio processes: %s", e)
 
                 # Stop streaming and clear state
                 self._clear_streaming_state()
@@ -1560,10 +1554,7 @@ class WakeStreamingSatellite(SatelliteBase):
                 await self.event_to_server(AudioStop(timestamp=0).event())
                 await self.trigger_streaming_stop()
 
-                # Add small delay for cleanup
-                await self._add_bluetooth_delay()
-
-                # Return to wake word detection
+                # Return to wake word detection immediately (no delay needed)
                 await self._send_wake_detect()
                 _LOGGER.info("Interrupted - waiting for wake word")
                 return
