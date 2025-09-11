@@ -92,6 +92,11 @@ async def main() -> None:
         type=int,
         help="Take microphone input from a specific channel (first channel is 0)",
     )
+    parser.add_argument(
+        "--mic-bluetooth-no-mute",
+        action="store_true",
+        help="Automatically disable microphone muting for Bluetooth devices",
+    )
 
     # Sound output
     parser.add_argument("--snd-uri", help="URI of Wyoming sound service")
@@ -150,6 +155,12 @@ async def main() -> None:
         type=float,
         default=5.0,
         help="Seconds after a wake word detection before another detection is handled (default: 5)",
+    )
+    parser.add_argument(
+        "--wake-listening-timeout",
+        type=float,
+        default=15.0,
+        help="Maximum seconds to listen for voice command after wake word (default: 15)",
     )
 
     # Voice activity detector
@@ -366,6 +377,7 @@ async def main() -> None:
             noise_suppression=args.mic_noise_suppression,
             seconds_to_mute_after_awake_wav=args.mic_seconds_to_mute_after_awake_wav,
             mute_during_awake_wav=(not args.mic_no_mute_during_awake_wav),
+            bluetooth_no_mute=args.mic_bluetooth_no_mute,
             channel_index=args.mic_channel_index,
         ),
         vad=VadSettings(
@@ -386,6 +398,7 @@ async def main() -> None:
                 if args.wake_refractory_seconds > 0
                 else None
             ),
+            listening_timeout=args.wake_listening_timeout,
         ),
         snd=SndSettings(
             uri=args.snd_uri,

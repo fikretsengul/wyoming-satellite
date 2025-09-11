@@ -652,7 +652,20 @@ class SatelliteBase:
             return
 
         try:
-            if mute_microphone:
+            # For Bluetooth devices, we should avoid muting as it causes audio loss
+            # Check if we're using a Bluetooth device (bluez_input or bluez_output in commands)
+            is_bluetooth = False
+            if self.settings.mic.bluetooth_no_mute:
+                # User explicitly set no mute for Bluetooth
+                is_bluetooth = True
+                _LOGGER.debug("Bluetooth no-mute option enabled, disabling microphone muting")
+            elif self.settings.mic.command:
+                mic_cmd = " ".join(self.settings.mic.command)
+                if "bluez_" in mic_cmd:
+                    is_bluetooth = True
+                    _LOGGER.debug("Bluetooth device detected, disabling microphone muting")
+
+            if mute_microphone and not is_bluetooth:
                 with wave.open(str(wav_path), "rb") as wav_file:
                     seconds_to_mute = wav_file.getnframes() / wav_file.getframerate()
 
@@ -1220,6 +1233,10 @@ class WakeStreamingSatellite(SatelliteBase):
 
         self._is_paused = False
 
+        # Add a timeout for listening state to prevent getting stuck
+        self._listening_timeout: Optional[float] = None
+        self._max_listening_seconds = settings.wake.listening_timeout
+
         self._wake_info: Optional[Info] = None
         self._wake_info_ready = asyncio.Event()
 
@@ -1252,6 +1269,7 @@ class WakeStreamingSatellite(SatelliteBase):
             # Stop streaming before event_from_server is called because it will
             # play the "done" WAV.
             self.is_streaming = False
+            self._listening_timeout = None  # Clear timeout
 
             # Stop debug recording (stt)
             if self.stt_audio_writer is not None:
@@ -1262,6 +1280,7 @@ class WakeStreamingSatellite(SatelliteBase):
         if is_run_satellite or is_transcript or is_error or is_pause_satellite:
             # Stop streaming
             self.is_streaming = False
+            self._listening_timeout = None  # Clear timeout
 
             if is_pause_satellite:
                 self._is_paused = True
@@ -1272,6 +1291,15 @@ class WakeStreamingSatellite(SatelliteBase):
 
                 # It's possible to be paused in the middle of streaming
                 if not self._is_paused:
+                    # Add a small delay for Bluetooth devices to reset properly
+                    is_bluetooth = False
+                    if self.settings.mic.command:
+                        mic_cmd = " ".join(self.settings.mic.command)
+                        if "bluez_" in mic_cmd:
+                            is_bluetooth = True
+                            _LOGGER.debug("Adding delay for Bluetooth device reset")
+                            await asyncio.sleep(0.5)
+
                     await self._send_wake_detect()
                     _LOGGER.info("Waiting for wake word")
 
@@ -1298,6 +1326,10 @@ class WakeStreamingSatellite(SatelliteBase):
         _LOGGER.debug(detection)
         self.is_streaming = True
         _LOGGER.info("Streaming audio")
+
+        # Set listening timeout to prevent getting stuck
+        self._listening_timeout = time.monotonic() + self._max_listening_seconds
+        _LOGGER.debug("Set listening timeout to %s seconds", self._max_listening_seconds)
 
         # Don't set refractory period for server commands.
         # Don't forward the detection event back to the server.
@@ -1340,6 +1372,26 @@ class WakeStreamingSatellite(SatelliteBase):
                 self.stt_audio_writer.write(audio_bytes)
 
         if self.is_streaming:
+            # Check for listening timeout
+            if self._listening_timeout is not None:
+                if time.monotonic() > self._listening_timeout:
+                    _LOGGER.warning("Listening timeout reached, stopping stream")
+                    self.is_streaming = False
+                    self._listening_timeout = None
+
+                    # Send error event to server
+                    error_event = Error(
+                        text="Listening timeout",
+                        code="timeout"
+                    ).event()
+                    await self.event_to_server(error_event)
+
+                    # Reset to wake word detection
+                    await self.trigger_streaming_stop()
+                    await self._send_wake_detect()
+                    _LOGGER.info("Waiting for wake word")
+                    return
+
             # Forward to server
             await self.event_to_server(event)
         else:
@@ -1367,6 +1419,11 @@ class WakeStreamingSatellite(SatelliteBase):
                 _LOGGER.debug("Wake word detection occurred during refractory period")
                 return
 
+            # Clear any buffered audio in the wake service to prevent false detections
+            # This is especially important for Bluetooth devices
+            await self.event_to_wake(AudioStop(timestamp=0).event())
+            await asyncio.sleep(0.1)  # Small delay to ensure wake service processes the stop
+
             # Stop debug recording (wake)
             if self.wake_audio_writer is not None:
                 self.wake_audio_writer.stop()
@@ -1379,6 +1436,10 @@ class WakeStreamingSatellite(SatelliteBase):
 
             self.is_streaming = True
             _LOGGER.debug("Streaming audio")
+
+            # Set listening timeout to prevent getting stuck
+            self._listening_timeout = time.monotonic() + self._max_listening_seconds
+            _LOGGER.debug("Set listening timeout to %s seconds", self._max_listening_seconds)
 
             if self.settings.wake.refractory_seconds is not None:
                 # Another detection may not occur for this wake word until
