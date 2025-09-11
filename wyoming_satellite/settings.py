@@ -59,6 +59,9 @@ class MicSettings(ServiceSettings):
     bluetooth_no_mute: bool = False
     """True to automatically disable muting for Bluetooth devices."""
 
+    bluetooth_extra_delay: float = 1.5
+    """Extra seconds to wait for Bluetooth audio latency after awake.wav."""
+
     channel_index: Optional[int] = None
     """Index of microphone channel to use. When not set, all input channels are used as-is."""
 

@@ -97,6 +97,12 @@ async def main() -> None:
         action="store_true",
         help="Automatically disable microphone muting for Bluetooth devices",
     )
+    parser.add_argument(
+        "--mic-bluetooth-extra-delay",
+        type=float,
+        default=1.5,
+        help="Extra seconds to wait for Bluetooth audio latency after awake.wav (default: 1.5)",
+    )
 
     # Sound output
     parser.add_argument("--snd-uri", help="URI of Wyoming sound service")
@@ -378,6 +384,7 @@ async def main() -> None:
             seconds_to_mute_after_awake_wav=args.mic_seconds_to_mute_after_awake_wav,
             mute_during_awake_wav=(not args.mic_no_mute_during_awake_wav),
             bluetooth_no_mute=args.mic_bluetooth_no_mute,
+            bluetooth_extra_delay=args.mic_bluetooth_extra_delay,
             channel_index=args.mic_channel_index,
         ),
         vad=VadSettings(

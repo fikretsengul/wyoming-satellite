@@ -1297,6 +1297,7 @@ class WakeStreamingSatellite(SatelliteBase):
         # Delay streaming to avoid hearing awake.wav
         self._streaming_delay: Optional[float] = None
         self._audio_start_sent = False  # Track if we've sent AudioStart to server
+        self._audio_buffer: List[Event] = []  # Buffer audio during delay period
 
         self._wake_info: Optional[Info] = None
         self._wake_info_ready = asyncio.Event()
@@ -1307,6 +1308,7 @@ class WakeStreamingSatellite(SatelliteBase):
         self._listening_timeout = None
         self._streaming_delay = None
         self._audio_start_sent = False
+        self._audio_buffer.clear()
 
     def _set_streaming_delays(self) -> None:
         """Set streaming delay and listening timeout after wake word detection."""
@@ -1314,11 +1316,17 @@ class WakeStreamingSatellite(SatelliteBase):
         if self.settings.snd.awake_wav:
             wav_duration = self._get_wav_duration(self.settings.snd.awake_wav)
             if wav_duration is not None and wav_duration > 0:
-                # Add extra buffer time for Bluetooth devices
-                total_delay = wav_duration + self.settings.mic.seconds_to_mute_after_awake_wav
+                # Add extra buffer time - more for Bluetooth devices due to latency
+                buffer_time = self.settings.mic.seconds_to_mute_after_awake_wav
+                if self._is_bluetooth_device():
+                    # Bluetooth devices need extra time due to audio latency/buffering
+                    buffer_time += self.settings.mic.bluetooth_extra_delay
+                    _LOGGER.debug("Added extra Bluetooth delay: %.1f seconds", self.settings.mic.bluetooth_extra_delay)
+
+                total_delay = wav_duration + buffer_time
                 self._streaming_delay = time.monotonic() + total_delay
                 _LOGGER.info("Streaming delay enabled: %.2f seconds (awake.wav: %.2f + buffer: %.2f)",
-                            total_delay, wav_duration, self.settings.mic.seconds_to_mute_after_awake_wav)
+                            total_delay, wav_duration, buffer_time)
             else:
                 _LOGGER.warning("Could not determine awake.wav duration, disabling streaming delay")
                 self._streaming_delay = None
@@ -1336,51 +1344,6 @@ class WakeStreamingSatellite(SatelliteBase):
             _LOGGER.debug("Adding delay for Bluetooth device reset")
             await asyncio.sleep(0.5)
 
-    async def _should_forward_audio(self) -> bool:
-        """Check if audio should be forwarded to the server.
-
-        Returns False if:
-        - We're still in the awake.wav delay period
-        - The listening timeout has been reached
-        """
-        current_time = time.monotonic()
-
-        # Check if we're still in the delay period (awake.wav playing)
-        if self._streaming_delay is not None:
-            if current_time < self._streaming_delay:
-                # Still playing awake.wav, don't forward audio to server
-                _LOGGER.debug("Still in streaming delay period (%.2f seconds remaining)",
-                             self._streaming_delay - current_time)
-                return False
-            else:
-                # Delay period is over, clear it
-                self._streaming_delay = None
-                _LOGGER.debug("Streaming delay ended, forwarding audio to server")
-
-        # Check for listening timeout
-        if self._listening_timeout is not None:
-            if current_time > self._listening_timeout:
-                _LOGGER.warning("Listening timeout reached, stopping stream")
-                self._clear_streaming_state()
-
-                # Send error event to server
-                error_event = Error(
-                    text="Listening timeout",
-                    code="timeout"
-                ).event()
-                await self.event_to_server(error_event)
-
-                # Reset to wake word detection
-                await self.trigger_streaming_stop()
-                await self._send_wake_detect()
-                _LOGGER.info("Waiting for wake word")
-                return False
-            else:
-                remaining = self._listening_timeout - current_time
-                if remaining <= 5:  # Log when close to timeout
-                    _LOGGER.debug("Listening timeout in %.1f seconds", remaining)
-
-        return True
 
     async def event_from_server(self, event: Event) -> None:
         # Handle fake Detection event from server to start a conversation
@@ -1505,11 +1468,63 @@ class WakeStreamingSatellite(SatelliteBase):
                 self.stt_audio_writer.write(audio_bytes)
 
         if self.is_streaming:
-            # Check if audio should be forwarded to server
-            if not await self._should_forward_audio():
+            # Check if we're still in delay period
+            if self._streaming_delay is not None and time.monotonic() < self._streaming_delay:
+                # Buffer audio during delay period
+                self._audio_buffer.append(event)
+                remaining = self._streaming_delay - time.monotonic()
+                if remaining > 1.0:  # Only log if more than 1 second remaining
+                    _LOGGER.debug("Buffering audio during delay (%.1f seconds remaining)", remaining)
                 return
 
-            # Send AudioStart event if this is the first audio after delay
+            # Delay period ended - send buffered audio and start normal streaming
+            if self._streaming_delay is not None:
+                self._streaming_delay = None
+                _LOGGER.debug("Streaming delay ended, processing %d buffered audio chunks", len(self._audio_buffer))
+
+                # Send AudioStart first
+                if self._audio_buffer:
+                    first_chunk = AudioChunk.from_event(self._audio_buffer[0])
+                    audio_start = AudioStart(
+                        rate=first_chunk.rate,
+                        width=first_chunk.width,
+                        channels=first_chunk.channels,
+                        timestamp=first_chunk.timestamp
+                    ).event()
+                    await self.event_to_server(audio_start)
+                    self._audio_start_sent = True
+                    _LOGGER.debug("Sent AudioStart to server")
+
+                # Send all buffered audio
+                for buffered_event in self._audio_buffer:
+                    await self.event_to_server(buffered_event)
+
+                self._audio_buffer.clear()
+
+            # Check for listening timeout
+            if self._listening_timeout is not None:
+                if time.monotonic() > self._listening_timeout:
+                    _LOGGER.warning("Listening timeout reached, stopping stream")
+                    self._clear_streaming_state()
+
+                    # Send error event to server
+                    error_event = Error(
+                        text="Listening timeout",
+                        code="timeout"
+                    ).event()
+                    await self.event_to_server(error_event)
+
+                    # Reset to wake word detection
+                    await self.trigger_streaming_stop()
+                    await self._send_wake_detect()
+                    _LOGGER.info("Waiting for wake word")
+                    return
+                else:
+                    remaining = self._listening_timeout - time.monotonic()
+                    if remaining <= 5:  # Log when close to timeout
+                        _LOGGER.debug("Listening timeout in %.1f seconds", remaining)
+
+            # Send AudioStart if this is the first audio after delay (fallback)
             if not self._audio_start_sent:
                 chunk = AudioChunk.from_event(event)
                 audio_start = AudioStart(
@@ -1520,9 +1535,9 @@ class WakeStreamingSatellite(SatelliteBase):
                 ).event()
                 await self.event_to_server(audio_start)
                 self._audio_start_sent = True
-                _LOGGER.debug("Sent AudioStart to server after streaming delay")
+                _LOGGER.debug("Sent AudioStart to server (fallback)")
 
-            # Forward to server
+            # Forward current audio to server
             await self.event_to_server(event)
         else:
             # Forward to wake word service
