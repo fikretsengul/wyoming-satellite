@@ -159,8 +159,8 @@ async def main() -> None:
     parser.add_argument(
         "--wake-silence-timeout",
         type=float,
-        default=3.0,
-        help="Seconds of silence before automatically stopping listening (default: 3.0, 0 to disable)",
+        default=2.0,
+        help="Seconds of silence before automatically stopping listening (default: 2.0, 0 to disable)",
     )
     parser.add_argument(
         "--wake-silence-threshold",
