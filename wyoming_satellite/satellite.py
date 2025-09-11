@@ -1290,10 +1290,6 @@ class WakeStreamingSatellite(SatelliteBase):
 
         self._is_paused = False
 
-        # Add a timeout for listening state to prevent getting stuck
-        self._listening_timeout: Optional[float] = None
-        self._max_listening_seconds = settings.wake.listening_timeout
-
         # Delay streaming to avoid hearing awake.wav
         self._streaming_delay: Optional[float] = None
         self._pipeline_started = False  # Track if we've sent RunPipeline to server
@@ -1304,37 +1300,25 @@ class WakeStreamingSatellite(SatelliteBase):
     def _clear_streaming_state(self) -> None:
         """Clear all streaming-related state variables."""
         self.is_streaming = False
-        self._listening_timeout = None
         self._streaming_delay = None
         self._pipeline_started = False
 
     def _set_streaming_delays(self) -> None:
-        """Set streaming delay and listening timeout after wake word detection."""
+        """Set streaming delay after wake word detection."""
         # Calculate awake.wav duration and set streaming delay
         if self.settings.snd.awake_wav:
             wav_duration = self._get_wav_duration(self.settings.snd.awake_wav)
             if wav_duration is not None and wav_duration > 0:
-                # Add extra buffer time - more for Bluetooth devices due to latency
-                buffer_time = self.settings.mic.seconds_to_mute_after_awake_wav
-                if self._is_bluetooth_device():
-                    # Bluetooth devices need extra time due to audio latency/buffering
-                    buffer_time += self.settings.mic.bluetooth_extra_delay
-                    _LOGGER.debug("Added extra Bluetooth delay: %.1f seconds", self.settings.mic.bluetooth_extra_delay)
-
-                total_delay = wav_duration + buffer_time
+                # Just use the WAV duration - no extra delays needed since we're staying idle
+                total_delay = wav_duration
                 self._streaming_delay = time.monotonic() + total_delay
-                _LOGGER.info("Streaming delay enabled: %.2f seconds (awake.wav: %.2f + buffer: %.2f)",
-                            total_delay, wav_duration, buffer_time)
+                _LOGGER.info("Streaming delay enabled: %.2f seconds (awake.wav duration)", total_delay)
             else:
                 _LOGGER.warning("Could not determine awake.wav duration, disabling streaming delay")
                 self._streaming_delay = None
         else:
             _LOGGER.debug("No awake.wav configured, streaming delay disabled")
             self._streaming_delay = None
-
-        # Set listening timeout to prevent getting stuck
-        self._listening_timeout = time.monotonic() + self._max_listening_seconds
-        _LOGGER.debug("Set listening timeout to %s seconds", self._max_listening_seconds)
 
     async def _add_bluetooth_delay(self) -> None:
         """Add a delay for Bluetooth devices to reset properly."""
@@ -1484,29 +1468,6 @@ class WakeStreamingSatellite(SatelliteBase):
                 if remaining > 1.0:  # Only log if more than 1 second remaining
                     _LOGGER.debug("Pipeline not started yet (%.1f seconds remaining)", remaining)
                 return
-
-            # Check for listening timeout
-            if self._listening_timeout is not None:
-                if time.monotonic() > self._listening_timeout:
-                    _LOGGER.warning("Listening timeout reached, stopping stream")
-                    self._clear_streaming_state()
-
-                    # Send error event to server
-                    error_event = Error(
-                        text="Listening timeout",
-                        code="timeout"
-                    ).event()
-                    await self.event_to_server(error_event)
-
-                    # Reset to wake word detection
-                    await self.trigger_streaming_stop()
-                    await self._send_wake_detect()
-                    _LOGGER.info("Waiting for wake word")
-                    return
-                else:
-                    remaining = self._listening_timeout - time.monotonic()
-                    if remaining <= 5:  # Log when close to timeout
-                        _LOGGER.debug("Listening timeout in %.1f seconds", remaining)
 
             # Forward audio to server (pipeline is running)
             await self.event_to_server(event)

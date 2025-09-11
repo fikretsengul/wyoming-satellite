@@ -59,9 +59,6 @@ class MicSettings(ServiceSettings):
     bluetooth_no_mute: bool = False
     """True to automatically disable muting for Bluetooth devices."""
 
-    bluetooth_extra_delay: float = 1.5
-    """Extra seconds to wait for Bluetooth audio latency after awake.wav."""
-
     channel_index: Optional[int] = None
     """Index of microphone channel to use. When not set, all input channels are used as-is."""
 
@@ -136,9 +133,6 @@ class WakeSettings(ServiceSettings):
 
     refractory_seconds: Optional[float] = 5.0
     """Seconds after a wake word detection before another detection is handled."""
-
-    listening_timeout: float = 15.0
-    """Maximum seconds to listen for voice command after wake word."""
 
 
 @dataclass(frozen=True)
