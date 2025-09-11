@@ -663,31 +663,51 @@ class SatelliteBase:
         return False
 
     def _get_wav_duration(self, wav_path: Union[str, Path]) -> Optional[float]:
-        """Get duration of a WAV file in seconds."""
-        try:
-            if not os.path.exists(str(wav_path)):
-                _LOGGER.warning("WAV file does not exist: %s", wav_path)
-                return None
+        """Get duration of a WAV file in seconds using multiple methods."""
+        if not os.path.exists(str(wav_path)):
+            _LOGGER.warning("WAV file does not exist: %s", wav_path)
+            return None
 
+        # Method 1: Try using wave module
+        try:
             with wave.open(str(wav_path), "rb") as wav_file:
                 frames = wav_file.getnframes()
                 rate = wav_file.getframerate()
 
-                # Check for corrupted/invalid WAV files
-                if rate == 0 or rate > 192000:  # Unreasonable sample rate
-                    _LOGGER.warning("Invalid sample rate (%d Hz) in WAV file: %s", rate, wav_path)
-                    return None
-
-                if frames <= 0 or frames > 100000000:  # More than reasonable for a short sound
-                    _LOGGER.warning("Invalid frame count (%d) in WAV file: %s - file may be corrupted", frames, wav_path)
-                    return None
-
-                duration = frames / rate
-                _LOGGER.debug("WAV file %s: %d frames, %d Hz, %.2f seconds", wav_path, frames, rate, duration)
-                return duration
+                # Check if values are reasonable
+                if rate > 0 and rate <= 192000 and frames > 0 and frames <= 100000000:
+                    duration = frames / rate
+                    if 0.1 <= duration <= 30:  # Reasonable duration for awake sound
+                        _LOGGER.debug("WAV file %s: %d frames, %d Hz, %.2f seconds (wave module)",
+                                     wav_path, frames, rate, duration)
+                        return duration
+                    else:
+                        _LOGGER.debug("WAV duration %.2f seconds seems unreasonable, trying fallback", duration)
+                else:
+                    _LOGGER.debug("WAV metadata seems invalid (frames=%d, rate=%d), trying fallback", frames, rate)
         except Exception as e:
-            _LOGGER.warning("Could not calculate WAV duration for %s: %s", wav_path, e)
-            return None
+            _LOGGER.debug("Wave module failed for %s: %s, trying fallback", wav_path, e)
+
+        # Method 2: Fallback - estimate based on file size
+        try:
+            file_size = os.path.getsize(str(wav_path))
+            # Rough estimate: assume 16-bit, 22050 Hz, mono
+            # File size includes headers, so subtract ~44 bytes for WAV header
+            audio_bytes = max(0, file_size - 100)  # Conservative header size
+            estimated_duration = audio_bytes / (2 * 22050)  # 2 bytes per sample, 22050 samples per second
+
+            if 0.1 <= estimated_duration <= 30:
+                _LOGGER.debug("WAV file %s: estimated %.2f seconds based on file size (%d bytes)",
+                             wav_path, estimated_duration, file_size)
+                return estimated_duration
+            else:
+                _LOGGER.debug("File size estimation gave unreasonable duration: %.2f seconds", estimated_duration)
+        except Exception as e:
+            _LOGGER.debug("File size estimation failed for %s: %s", wav_path, e)
+
+        # Method 3: Use a fixed reasonable default
+        _LOGGER.warning("Could not determine WAV duration for %s, using default 2 seconds", wav_path)
+        return 2.0  # Default to 2 seconds - reasonable for most awake sounds
 
     async def _play_wav(
         self, wav_path: Optional[Union[str, Path]], mute_microphone: bool = False
@@ -1291,16 +1311,17 @@ class WakeStreamingSatellite(SatelliteBase):
         # Calculate awake.wav duration and set streaming delay
         if self.settings.snd.awake_wav:
             wav_duration = self._get_wav_duration(self.settings.snd.awake_wav)
-            if wav_duration is not None and wav_duration > 0 and wav_duration < 30:  # Sanity check
+            if wav_duration is not None and wav_duration > 0:
                 # Add extra buffer time for Bluetooth devices
                 total_delay = wav_duration + self.settings.mic.seconds_to_mute_after_awake_wav
                 self._streaming_delay = time.monotonic() + total_delay
-                _LOGGER.debug("Set streaming delay for %.2f seconds (awake.wav duration: %.2f + buffer: %.2f)",
-                             total_delay, wav_duration, self.settings.mic.seconds_to_mute_after_awake_wav)
+                _LOGGER.info("Streaming delay enabled: %.2f seconds (awake.wav: %.2f + buffer: %.2f)",
+                            total_delay, wav_duration, self.settings.mic.seconds_to_mute_after_awake_wav)
             else:
-                _LOGGER.warning("Invalid or missing awake.wav, disabling streaming delay")
+                _LOGGER.warning("Could not determine awake.wav duration, disabling streaming delay")
                 self._streaming_delay = None
         else:
+            _LOGGER.debug("No awake.wav configured, streaming delay disabled")
             self._streaming_delay = None
 
         # Set listening timeout to prevent getting stuck
