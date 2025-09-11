@@ -282,7 +282,11 @@ class SatelliteBase:
         elif AudioStop.is_type(event.type):
             # TTS stopped
             self._tts_playing = False
-            _LOGGER.debug("TTS playback stopped")
+            if self._interrupt_requested:
+                _LOGGER.debug("TTS playback stopped (interrupted by wake word)")
+                self._interrupt_requested = False
+            else:
+                _LOGGER.debug("TTS playback stopped (natural end)")
             await self.event_to_snd(event)
             await self.trigger_tts_stop()
         elif Detect.is_type(event.type):
@@ -1321,6 +1325,7 @@ class WakeStreamingSatellite(SatelliteBase):
 
         # Track TTS state for wake word interruption
         self._tts_playing = False
+        self._interrupt_requested = False  # Track if user requested interrupt
 
         # Cache WAV duration at startup for performance
         self._awake_wav_duration: Optional[float] = None
@@ -1338,6 +1343,7 @@ class WakeStreamingSatellite(SatelliteBase):
         self._streaming_delay = None
         self._pipeline_started = False
         self._tts_playing = False
+        self._interrupt_requested = False
 
     def _set_streaming_delays(self) -> None:
         """Set streaming delay after wake word detection."""
@@ -1529,11 +1535,23 @@ class WakeStreamingSatellite(SatelliteBase):
             # Check if we should interrupt ongoing activity
             if self.is_streaming or self._tts_playing:
                 _LOGGER.info("Wake word interrupt detected - stopping current activity")
+                self._interrupt_requested = True
 
-                # Stop any ongoing TTS playback
+                # Stop any ongoing TTS playback aggressively
                 if self._tts_playing:
+                    # Send AudioStop to the sound service
                     await self.event_to_snd(AudioStop(timestamp=0).event())
                     _LOGGER.debug("Sent AudioStop to interrupt TTS")
+
+                    # Kill the sound process directly via command
+                    if self.settings.snd.command:
+                        try:
+                            import subprocess
+                            # Kill any pacat processes to stop audio immediately
+                            subprocess.run(['pkill', '-f', 'pacat'], check=False)
+                            _LOGGER.debug("Killed pacat processes to stop TTS immediately")
+                        except Exception as e:
+                            _LOGGER.debug("Could not kill pacat processes: %s", e)
 
                 # Stop streaming and clear state
                 self._clear_streaming_state()
