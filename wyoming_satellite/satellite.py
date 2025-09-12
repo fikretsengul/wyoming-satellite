@@ -928,6 +928,10 @@ class SatelliteBase:
         await run_event_command(self.settings.event.connected)
         await self.forward_event(SatelliteConnected().event())
 
+        # Check if we need to set state to idle after interrupt restart
+        if hasattr(self, '_handle_post_interrupt_state'):
+            await self._handle_post_interrupt_state()
+
     async def trigger_server_disonnected(self) -> None:
         """Called when disconnected from server."""
         _LOGGER.info("Disconnected from server")
@@ -1327,6 +1331,9 @@ class WakeStreamingSatellite(SatelliteBase):
         self._tts_playing = False
         self._interrupt_requested = False  # Track if user requested interrupt
 
+        # Check if we restarted due to an interrupt
+        self._check_interrupt_flag()
+
         # Cache WAV duration at startup for performance
         self._awake_wav_duration: Optional[float] = None
         if settings.snd.awake_wav:
@@ -1336,6 +1343,31 @@ class WakeStreamingSatellite(SatelliteBase):
 
         self._wake_info: Optional[Info] = None
         self._wake_info_ready = asyncio.Event()
+
+    def _check_interrupt_flag(self) -> None:
+        """Check if we restarted due to an interrupt."""
+        try:
+            import tempfile
+            flag_file = os.path.join(tempfile.gettempdir(), 'wyoming_satellite_interrupted')
+            if os.path.exists(flag_file):
+                _LOGGER.info("Detected restart after wake word interrupt")
+                self._was_interrupted = True
+                # Remove the flag file
+                os.remove(flag_file)
+            else:
+                self._was_interrupted = False
+        except Exception as e:
+            _LOGGER.debug("Could not check interrupt flag: %s", e)
+            self._was_interrupted = False
+
+    async def _handle_post_interrupt_state(self) -> None:
+        """Handle state setting after interrupt restart."""
+        if hasattr(self, '_was_interrupted') and self._was_interrupted:
+            _LOGGER.info("Post-interrupt: setting state to idle")
+            # Send events to ensure HA knows we're idle
+            await self.trigger_streaming_stop()  # Ensure HA knows we're not streaming
+            await self._send_wake_detect()  # Set to wake detection (idle) state
+            self._was_interrupted = False
 
     def _clear_streaming_state(self) -> None:
         """Clear all streaming-related state variables."""
@@ -1529,70 +1561,39 @@ class WakeStreamingSatellite(SatelliteBase):
                 _LOGGER.info("Wake word interrupt detected - stopping current activity")
                 self._interrupt_requested = True
 
-                # Remember if TTS was playing before we clear state
-                was_tts_playing = self._tts_playing
+                # Stop any ongoing TTS playback aggressively
+                if self._tts_playing:
+                    # Send AudioStop to the sound service
+                    await self.event_to_snd(AudioStop(timestamp=0).event())
+                    _LOGGER.debug("Sent AudioStop to interrupt TTS")
 
-                # Stop any ongoing TTS playback
-                if was_tts_playing:
-                    # Send multiple AudioStop events to ensure TTS stops
-                    for _ in range(3):
-                        await self.event_to_snd(AudioStop(timestamp=0).event())
-                    _LOGGER.debug("Sent multiple AudioStop events to interrupt TTS")
+                    # Kill the sound process directly via command (works for all audio devices)
+                    if self.settings.snd.command:
+                        try:
+                            import subprocess
+                            # Kill any audio playback processes to stop TTS immediately
+                            # This works for pacat, aplay, and other audio commands
+                            cmd_name = self.settings.snd.command[0].split('/')[-1]  # Get just the command name
+                            subprocess.run(['pkill', '-f', cmd_name], check=False)
+                            _LOGGER.debug("Killed %s processes to stop TTS immediately", cmd_name)
+                        except Exception as e:
+                            _LOGGER.debug("Could not kill audio processes: %s", e)
 
                 # Stop streaming and clear state
                 self._clear_streaming_state()
 
-                # Send proper stop sequence to Home Assistant
-                await self.event_to_server(AudioStop(timestamp=0).event())
-                await self.trigger_streaming_stop()
+                # Create a flag file to indicate we were interrupted (survives restart)
+                try:
+                    import tempfile
+                    flag_file = os.path.join(tempfile.gettempdir(), 'wyoming_satellite_interrupted')
+                    with open(flag_file, 'w') as f:
+                        f.write('interrupted')
+                    _LOGGER.debug("Created interrupt flag file: %s", flag_file)
+                except Exception as e:
+                    _LOGGER.debug("Could not create interrupt flag: %s", e)
 
-                # Send PauseSatellite to set HA state to idle
-                from wyoming.satellite import PauseSatellite
-                await self.event_to_server(PauseSatellite().event())
-                _LOGGER.debug("Sent PauseSatellite to set HA state to idle")
-
-                # Flush events and wait for HA to process
-                if self._writer:
-                    try:
-                        await self._writer.drain()
-                        await asyncio.sleep(0.2)  # Give HA time to process
-                    except Exception:
-                        pass
-
-                # Try to stop TTS without crashing the satellite
-                if was_tts_playing and self.settings.snd.command:
-                    try:
-                        import subprocess
-                        import signal
-
-                        # Try SIGTERM first (graceful)
-                        cmd_name = self.settings.snd.command[0].split('/')[-1]
-                        result = subprocess.run(['pgrep', '-f', cmd_name], capture_output=True, text=True)
-                        if result.returncode == 0:
-                            pids = result.stdout.strip().split('\n')
-                            for pid in pids:
-                                if pid.strip():
-                                    try:
-                                        subprocess.run(['kill', '-TERM', pid.strip()], check=False)
-                                        _LOGGER.debug("Sent SIGTERM to PID %s (%s)", pid.strip(), cmd_name)
-                                    except Exception:
-                                        pass
-
-                            # Wait a moment for graceful shutdown
-                            await asyncio.sleep(0.3)
-
-                            # If still running, use SIGKILL
-                            result = subprocess.run(['pgrep', '-f', cmd_name], capture_output=True)
-                            if result.returncode == 0:
-                                subprocess.run(['pkill', '-9', '-f', cmd_name], check=False)
-                                _LOGGER.debug("Sent SIGKILL to %s processes", cmd_name)
-
-                    except Exception as e:
-                        _LOGGER.debug("Could not stop audio processes gracefully: %s", e)
-
-                # Return to wake word detection
-                await self._send_wake_detect()
-                _LOGGER.info("Interrupted - waiting for wake word")
+                # Kill the audio process - this will cause satellite to restart
+                _LOGGER.info("Interrupted - satellite will restart and return to idle")
                 return
 
             # Normal wake word detection (not interrupting)
