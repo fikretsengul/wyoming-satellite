@@ -1363,10 +1363,24 @@ class WakeStreamingSatellite(SatelliteBase):
     async def _handle_post_interrupt_state(self) -> None:
         """Handle state setting after interrupt restart."""
         if hasattr(self, '_was_interrupted') and self._was_interrupted:
-            _LOGGER.info("Post-interrupt: setting state to idle")
-            # Send events to ensure HA knows we're idle
-            await self.trigger_streaming_stop()  # Ensure HA knows we're not streaming
-            await self._send_wake_detect()  # Set to wake detection (idle) state
+            _LOGGER.info("Post-interrupt: forcing HA state to idle")
+
+            # Send PauseSatellite to force HA to idle state
+            from wyoming.satellite import PauseSatellite
+            await self.event_to_server(PauseSatellite().event())
+            _LOGGER.debug("Sent PauseSatellite to force HA idle state")
+
+            # Small delay to let HA process the pause
+            await asyncio.sleep(0.2)
+
+            # Then send RunSatellite to resume normal operation
+            from wyoming.satellite import RunSatellite
+            await self.event_to_server(RunSatellite().event())
+            _LOGGER.debug("Sent RunSatellite to resume normal operation")
+
+            # Start wake word detection
+            await self._send_wake_detect()
+            _LOGGER.info("Forced HA state reset - now waiting for wake word")
             self._was_interrupted = False
 
     def _clear_streaming_state(self) -> None:
