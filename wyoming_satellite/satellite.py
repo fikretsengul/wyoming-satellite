@@ -276,17 +276,17 @@ class SatelliteBase:
         elif AudioStart.is_type(event.type):
             # TTS started
             self._tts_playing = True
-            _LOGGER.debug("TTS playback started")
+            _LOGGER.debug("TTS playback started - AudioStart received")
             await self.event_to_snd(event)
             await self.trigger_tts_start()
         elif AudioStop.is_type(event.type):
-            # TTS stopped
-            self._tts_playing = False
+            # TTS stopped - but only clear flag if not interrupted
             if self._interrupt_requested:
-                _LOGGER.debug("TTS playback stopped (interrupted by wake word)")
+                _LOGGER.debug("TTS playback stopped (interrupted by wake word) - keeping tts_playing=True")
                 self._interrupt_requested = False
             else:
-                _LOGGER.debug("TTS playback stopped (natural end)")
+                _LOGGER.debug("TTS playback stopped (natural end) - setting tts_playing=False")
+                self._tts_playing = False  # Only clear on natural end
             await self.event_to_snd(event)
             await self.trigger_tts_stop()
         elif Detect.is_type(event.type):
@@ -310,7 +310,7 @@ class SatelliteBase:
         elif Synthesize.is_type(event.type):
             # TTS request
             self._tts_playing = True  # TTS will start soon
-            _LOGGER.debug("TTS synthesis started")
+            _LOGGER.debug("TTS synthesis started - marked as playing")
             _LOGGER.debug(event)
             await self.trigger_synthesize(Synthesize.from_event(event))
         elif Error.is_type(event.type):
