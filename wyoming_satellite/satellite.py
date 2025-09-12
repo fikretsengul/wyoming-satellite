@@ -929,7 +929,7 @@ class SatelliteBase:
         await self.forward_event(SatelliteConnected().event())
 
         # Check if we need to set state to idle after interrupt restart
-        if hasattr(self, '_handle_post_interrupt_state'):
+        if isinstance(self, WakeStreamingSatellite):
             await self._handle_post_interrupt_state()
 
     async def trigger_server_disonnected(self) -> None:
@@ -1350,11 +1350,13 @@ class WakeStreamingSatellite(SatelliteBase):
             import tempfile
             flag_file = os.path.join(tempfile.gettempdir(), 'wyoming_satellite_interrupted')
             if os.path.exists(flag_file):
-                _LOGGER.info("Detected restart after wake word interrupt")
+                _LOGGER.info("Detected restart after wake word interrupt - flag file exists")
                 self._was_interrupted = True
                 # Remove the flag file
                 os.remove(flag_file)
+                _LOGGER.debug("Removed interrupt flag file")
             else:
+                _LOGGER.debug("No interrupt flag file found - normal startup")
                 self._was_interrupted = False
         except Exception as e:
             _LOGGER.debug("Could not check interrupt flag: %s", e)
@@ -1362,6 +1364,8 @@ class WakeStreamingSatellite(SatelliteBase):
 
     async def _handle_post_interrupt_state(self) -> None:
         """Handle state setting after interrupt restart."""
+        _LOGGER.debug("Checking post-interrupt state - was_interrupted: %s", getattr(self, '_was_interrupted', False))
+
         if hasattr(self, '_was_interrupted') and self._was_interrupted:
             _LOGGER.info("Post-interrupt: forcing HA state to idle")
 
@@ -1382,6 +1386,8 @@ class WakeStreamingSatellite(SatelliteBase):
             await self._send_wake_detect()
             _LOGGER.info("Forced HA state reset - now waiting for wake word")
             self._was_interrupted = False
+        else:
+            _LOGGER.debug("No post-interrupt state handling needed")
 
     def _clear_streaming_state(self) -> None:
         """Clear all streaming-related state variables."""
@@ -1396,11 +1402,11 @@ class WakeStreamingSatellite(SatelliteBase):
         # Use cached awake.wav duration
         if self._awake_wav_duration is not None and self._awake_wav_duration > 0:
             # Add acoustic echo buffer for Bluetooth devices to prevent hearing awake.wav echo
-            echo_buffer = 0.75 if self._is_bluetooth_device() else 0.25
-            total_delay = self._awake_wav_duration + echo_buffer
+            # echo_buffer = 0.75 if self._is_bluetooth_device() else 0.25
+            total_delay = self._awake_wav_duration # + echo_buffer
             self._streaming_delay = time.monotonic() + total_delay
-            _LOGGER.info("Streaming delay enabled: %.3f seconds (awake.wav: %.3f + echo buffer: %.2f)",
-                        total_delay, self._awake_wav_duration, echo_buffer)
+            """ _LOGGER.info("Streaming delay enabled: %.3f seconds (awake.wav: %.3f + echo buffer: %.2f)",
+                        total_delay, self._awake_wav_duration, echo_buffer) """
         else:
             _LOGGER.debug("No awake.wav duration available, streaming delay disabled")
             self._streaming_delay = None
