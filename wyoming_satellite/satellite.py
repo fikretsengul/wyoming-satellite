@@ -1575,28 +1575,7 @@ class WakeStreamingSatellite(SatelliteBase):
                 _LOGGER.info("Wake word interrupt detected - stopping current activity")
                 self._interrupt_requested = True
 
-                # Stop any ongoing TTS playback aggressively
-                if self._tts_playing:
-                    # Send AudioStop to the sound service
-                    await self.event_to_snd(AudioStop(timestamp=0).event())
-                    _LOGGER.debug("Sent AudioStop to interrupt TTS")
-
-                    # Kill the sound process directly via command (works for all audio devices)
-                    if self.settings.snd.command:
-                        try:
-                            import subprocess
-                            # Kill any audio playback processes to stop TTS immediately
-                            # This works for pacat, aplay, and other audio commands
-                            cmd_name = self.settings.snd.command[0].split('/')[-1]  # Get just the command name
-                            subprocess.run(['pkill', '-f', cmd_name], check=False)
-                            _LOGGER.debug("Killed %s processes to stop TTS immediately", cmd_name)
-                        except Exception as e:
-                            _LOGGER.debug("Could not kill audio processes: %s", e)
-
-                # Stop streaming and clear state
-                self._clear_streaming_state()
-
-                # Create a flag file to indicate we were interrupted (survives restart)
+                # Create a flag file FIRST to indicate we were interrupted (survives restart)
                 try:
                     import tempfile
                     flag_file = os.path.join(tempfile.gettempdir(), 'wyoming_satellite_interrupted')
@@ -1606,7 +1585,27 @@ class WakeStreamingSatellite(SatelliteBase):
                 except Exception as e:
                     _LOGGER.debug("Could not create interrupt flag: %s", e)
 
-                # Kill the audio process - this will cause satellite to restart
+                # Stop any ongoing TTS playback aggressively
+                if self._tts_playing:
+                    # Send AudioStop to the sound service
+                    await self.event_to_snd(AudioStop(timestamp=0).event())
+                    _LOGGER.debug("Sent AudioStop to interrupt TTS")
+
+                # Kill the sound process directly (works for all audio devices)
+                if self.settings.snd.command:
+                    try:
+                        import subprocess
+                        # Kill any audio playback processes to stop TTS immediately
+                        cmd_name = self.settings.snd.command[0].split('/')[-1]  # Get just the command name
+                        subprocess.run(['pkill', '-f', cmd_name], check=False)
+                        _LOGGER.debug("Killed %s processes to stop TTS immediately", cmd_name)
+                    except Exception as e:
+                        _LOGGER.debug("Could not kill audio processes: %s", e)
+
+                # Stop streaming and clear state
+                self._clear_streaming_state()
+
+                # The pkill will cause satellite to restart - flag file will trigger state reset
                 _LOGGER.info("Interrupted - satellite will restart and return to idle")
                 return
 
