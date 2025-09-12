@@ -274,21 +274,14 @@ class SatelliteBase:
             await self.event_to_snd(event)
             forward_event = False
         elif AudioStart.is_type(event.type):
-            # TTS started - update timing
-            if not self._tts_playing:
-                self._tts_start_time = time.monotonic()
-                self._tts_playing = True
+            # TTS started
+            self._tts_playing = True
             _LOGGER.debug("TTS playback started - AudioStart received")
             await self.event_to_snd(event)
             await self.trigger_tts_start()
         elif AudioStop.is_type(event.type):
-            # TTS stopped - but only clear flag if not interrupted
-            if self._interrupt_requested:
-                _LOGGER.debug("TTS playback stopped (interrupted by wake word) - keeping tts_playing=True")
-                self._interrupt_requested = False
-            else:
-                _LOGGER.debug("TTS playback stopped (natural end) - setting tts_playing=False")
-                self._tts_playing = False  # Only clear on natural end
+            # TTS stopped - ignore AudioStop, wait for Played event
+            _LOGGER.debug("TTS AudioStop received - ignoring for state tracking")
             await self.event_to_snd(event)
             await self.trigger_tts_stop()
         elif Detect.is_type(event.type):
@@ -311,16 +304,10 @@ class SatelliteBase:
             await self.trigger_transcript(Transcript.from_event(event))
         elif Synthesize.is_type(event.type):
             # TTS request
-            synthesize_event = Synthesize.from_event(event)
-            text_length = len(synthesize_event.text)
-            # Rough estimate: ~150 words per minute, ~5 chars per word
-            self._tts_estimated_duration = max(2.0, text_length / (150 * 5 / 60))  # At least 2 seconds
-            self._tts_start_time = time.monotonic()
             self._tts_playing = True
-            _LOGGER.debug("TTS synthesis started - text length: %d, estimated duration: %.1f seconds",
-                         text_length, self._tts_estimated_duration)
+            _LOGGER.debug("TTS synthesis started - marked as playing")
             _LOGGER.debug(event)
-            await self.trigger_synthesize(synthesize_event)
+            await self.trigger_synthesize(Synthesize.from_event(event))
         elif Error.is_type(event.type):
             _LOGGER.warning(event)
             await self.trigger_error(Error.from_event(event))
@@ -967,6 +954,10 @@ class SatelliteBase:
 
     async def trigger_played(self) -> None:
         """Called when audio stopped playing"""
+        # This is the reliable indicator that TTS actually finished
+        if self._tts_playing:
+            _LOGGER.debug("TTS actually finished - Played event received")
+            self._tts_playing = False
         await run_event_command(self.settings.event.played)
         await self.forward_event(Played().event())
 
@@ -1335,8 +1326,6 @@ class WakeStreamingSatellite(SatelliteBase):
         # Track TTS state for wake word interruption
         self._tts_playing = False
         self._interrupt_requested = False  # Track if user requested interrupt
-        self._tts_start_time: Optional[float] = None  # When TTS started
-        self._tts_estimated_duration: float = 0.0  # Estimated TTS duration
 
         # Cache WAV duration at startup for performance
         self._awake_wav_duration: Optional[float] = None
@@ -1535,15 +1524,6 @@ class WakeStreamingSatellite(SatelliteBase):
 
         if Detection.is_type(event.type):
             detection = Detection.from_event(event)
-
-            # Check if TTS is actually still playing based on time
-            if self._tts_start_time is not None and self._tts_playing:
-                elapsed = time.monotonic() - self._tts_start_time
-                if elapsed > self._tts_estimated_duration + 2.0:  # Add 2 second buffer
-                    _LOGGER.debug("TTS estimated to be finished (%.1fs elapsed, %.1fs estimated)",
-                                 elapsed, self._tts_estimated_duration)
-                    self._tts_playing = False
-                    self._tts_start_time = None
 
             # Debug current state
             _LOGGER.debug("Wake word detected - streaming: %s, tts_playing: %s", self.is_streaming, self._tts_playing)
