@@ -928,9 +928,6 @@ class SatelliteBase:
         await run_event_command(self.settings.event.connected)
         await self.forward_event(SatelliteConnected().event())
 
-        # Check if we need to set state to idle after interrupt restart
-        if isinstance(self, WakeStreamingSatellite):
-            await self._handle_post_interrupt_state()
 
     async def trigger_server_disonnected(self) -> None:
         """Called when disconnected from server."""
@@ -1331,9 +1328,6 @@ class WakeStreamingSatellite(SatelliteBase):
         self._tts_playing = False
         self._interrupt_requested = False  # Track if user requested interrupt
 
-        # Check if we restarted due to an interrupt
-        self._check_interrupt_flag()
-
         # Cache WAV duration at startup for performance
         self._awake_wav_duration: Optional[float] = None
         if settings.snd.awake_wav:
@@ -1344,49 +1338,6 @@ class WakeStreamingSatellite(SatelliteBase):
         self._wake_info: Optional[Info] = None
         self._wake_info_ready = asyncio.Event()
 
-    def _check_interrupt_flag(self) -> None:
-        """Check if we restarted due to an interrupt."""
-        try:
-            import tempfile
-            flag_file = os.path.join(tempfile.gettempdir(), 'wyoming_satellite_interrupted')
-            if os.path.exists(flag_file):
-                _LOGGER.info("Detected restart after wake word interrupt - flag file exists")
-                self._was_interrupted = True
-                # Remove the flag file
-                os.remove(flag_file)
-                _LOGGER.debug("Removed interrupt flag file")
-            else:
-                _LOGGER.debug("No interrupt flag file found - normal startup")
-                self._was_interrupted = False
-        except Exception as e:
-            _LOGGER.debug("Could not check interrupt flag: %s", e)
-            self._was_interrupted = False
-
-    async def _handle_post_interrupt_state(self) -> None:
-        """Handle state setting after interrupt restart."""
-        _LOGGER.debug("Checking post-interrupt state - was_interrupted: %s", getattr(self, '_was_interrupted', False))
-
-        if hasattr(self, '_was_interrupted') and self._was_interrupted:
-            _LOGGER.info("Post-interrupt: forcing HA state to idle")
-
-            # Send an Error event to force HA to reset state
-            from wyoming.error import Error
-            error_event = Error(
-                text="Interrupted by wake word",
-                code="interrupted"
-            ).event()
-            await self.event_to_server(error_event)
-            _LOGGER.debug("Sent Error event to reset HA state")
-
-            # Small delay to let HA process the error
-            await asyncio.sleep(0.3)
-
-            # Start wake word detection to set idle state
-            await self._send_wake_detect()
-            _LOGGER.info("Forced HA state reset via Error event - now waiting for wake word")
-            self._was_interrupted = False
-        else:
-            _LOGGER.debug("No post-interrupt state handling needed")
 
     def _clear_streaming_state(self) -> None:
         """Clear all streaming-related state variables."""
@@ -1582,16 +1533,6 @@ class WakeStreamingSatellite(SatelliteBase):
             if self.is_streaming or self._tts_playing:
                 _LOGGER.info("Wake word interrupt detected - stopping current activity (streaming: %s, tts: %s)",
                             self.is_streaming, self._tts_playing)
-
-                # Create flag file for restart state management
-                try:
-                    import tempfile
-                    flag_file = os.path.join(tempfile.gettempdir(), 'wyoming_satellite_interrupted')
-                    with open(flag_file, 'w') as f:
-                        f.write('interrupted')
-                    _LOGGER.debug("Created interrupt flag file: %s", flag_file)
-                except Exception as e:
-                    _LOGGER.debug("Could not create interrupt flag: %s", e)
 
                 # Kill audio processes immediately to stop TTS
                 if self.settings.snd.command:
