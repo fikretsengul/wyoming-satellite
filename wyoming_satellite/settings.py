@@ -84,6 +84,9 @@ class SndSettings(ServiceSettings):
     done_wav: Optional[str] = None
     """Path to WAV file played after voice command is recognized."""
 
+    ready_wav: Optional[str] = None
+    """Path to WAV file played when satellite is ready and waiting for wake word."""
+
     rate: int = 22050
     """Sample rate of output audio (hertz)"""
 

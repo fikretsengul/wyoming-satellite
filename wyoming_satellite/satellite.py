@@ -1380,6 +1380,9 @@ class WakeStreamingSatellite(SatelliteBase):
                     await self._send_wake_detect()
                     _LOGGER.info("Waiting for wake word")
 
+                    # Play ready sound to indicate satellite is ready
+                    await self._play_wav(self.settings.snd.ready_wav)
+
                     # Start debug recording (wake)
                     self._debug_recording_timestamp = time.monotonic_ns()
                     if self.wake_audio_writer is not None:

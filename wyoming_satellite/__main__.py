@@ -253,6 +253,9 @@ async def main() -> None:
         "--done-wav", help="WAV file to play when voice command is done"
     )
     parser.add_argument(
+        "--ready-wav", help="WAV file to play when satellite is ready and waiting for wake word"
+    )
+    parser.add_argument(
         "--timer-finished-wav", help="WAV file to play when a timer finishes"
     )
     parser.add_argument(
@@ -396,6 +399,7 @@ async def main() -> None:
             volume_multiplier=args.snd_volume_multiplier,
             awake_wav=args.awake_wav,
             done_wav=args.done_wav,
+            ready_wav=args.ready_wav,
         ),
         event=EventSettings(
             uri=args.event_uri,

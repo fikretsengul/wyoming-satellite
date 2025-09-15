@@ -136,6 +136,7 @@ You can play a WAV file when the wake word is detected (locally or remotely), an
 
 * `--awake-wav <WAV>` - played when the wake word is detected
 * `--done-wav <WAV>` - played when the voice command is finished
+* `--ready-wav <WAV>` - played when the satellite is ready and waiting for wake word
 * `--timer-finished-wav <WAV>` - played when a timer is finished
 
 If you want to play audio files other than WAV, use [event commands](#event-commands). Specifically, the `--detection-command` to replace `--awake-wav` and `--transcript-command` to replace `--done-wav`.
