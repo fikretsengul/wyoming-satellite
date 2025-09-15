@@ -283,7 +283,7 @@ class SatelliteBase:
             # TTS stopped - ignore AudioStop, wait for Played event
             _LOGGER.debug("TTS AudioStop received - ignoring for state tracking")
             await self.event_to_snd(event)
-            await self.trigger_tts_stop()
+            # Don't trigger tts_stop here - wait for actual playback completion
         elif Detect.is_type(event.type):
             # Wake word detection started
             await self.trigger_detect()
@@ -958,6 +958,8 @@ class SatelliteBase:
         if self._tts_playing:
             _LOGGER.debug("TTS actually finished - Played event received")
             self._tts_playing = False
+            # Now trigger tts_stop since TTS actually finished playing
+            await self.trigger_tts_stop()
         await run_event_command(self.settings.event.played)
         await self.forward_event(Played().event())
 
