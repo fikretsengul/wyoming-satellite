@@ -280,10 +280,8 @@ class SatelliteBase:
             await self.event_to_snd(event)
             await self.trigger_tts_start()
         elif AudioStop.is_type(event.type):
-            # TTS stopped - ignore AudioStop, wait for Played event
-            _LOGGER.debug("TTS AudioStop received - ignoring for state tracking")
+            # Forward AudioStop to sound service but don't handle it for state tracking
             await self.event_to_snd(event)
-            # Don't trigger tts_stop here - wait for actual playback completion
         elif Detect.is_type(event.type):
             # Wake word detection started
             await self.trigger_detect()
@@ -650,22 +648,6 @@ class SatelliteBase:
 
         return audio_bytes
 
-    def _is_bluetooth_device(self) -> bool:
-        """Check if we're using a Bluetooth audio device."""
-        if self.settings.mic.bluetooth_no_mute:
-            return True
-
-        if self.settings.mic.command:
-            mic_cmd = " ".join(self.settings.mic.command)
-            if "bluez_" in mic_cmd:
-                return True
-
-        if self.settings.snd.command:
-            snd_cmd = " ".join(self.settings.snd.command)
-            if "bluez_" in snd_cmd:
-                return True
-
-        return False
 
     def _get_wav_duration_precise(self, wav_path: Union[str, Path]) -> Optional[float]:
         """Get precise duration of a WAV file using external tools."""
@@ -741,21 +723,8 @@ class SatelliteBase:
             return
 
         try:
-            # For Bluetooth devices, we should avoid muting as it causes audio loss
-            is_bluetooth = self._is_bluetooth_device()
-            if is_bluetooth:
-                _LOGGER.debug("Bluetooth device detected, disabling microphone muting")
-
-            if mute_microphone and not is_bluetooth:
-                with wave.open(str(wav_path), "rb") as wav_file:
-                    seconds_to_mute = wav_file.getnframes() / wav_file.getframerate()
-
-                seconds_to_mute += self.settings.mic.seconds_to_mute_after_awake_wav
-                _LOGGER.debug("Muting microphone for %s second(s)", seconds_to_mute)
-                self.microphone_muted = True
-                self._unmute_microphone_task = asyncio.create_task(
-                    self._unmute_microphone_after(seconds_to_mute)
-                )
+            # Microphone muting disabled to enable wake word interruption for all devices
+            _LOGGER.debug("Microphone muting disabled for wake word interruption support")
 
             for event in wav_to_events(
                 wav_path,
@@ -1352,12 +1321,7 @@ class WakeStreamingSatellite(SatelliteBase):
         """Set streaming delay after wake word detection."""
         # Use cached awake.wav duration
         if self._awake_wav_duration is not None and self._awake_wav_duration > 0:
-            # Add acoustic echo buffer for Bluetooth devices to prevent hearing awake.wav echo
-            # echo_buffer = 0.75 if self._is_bluetooth_device() else 0.25
-            total_delay = self._awake_wav_duration # + echo_buffer
-            self._streaming_delay = time.monotonic() + total_delay
-            """ _LOGGER.info("Streaming delay enabled: %.3f seconds (awake.wav: %.3f + echo buffer: %.2f)",
-                        total_delay, self._awake_wav_duration, echo_buffer) """
+            self._streaming_delay = time.monotonic() + self._awake_wav_duration
         else:
             _LOGGER.debug("No awake.wav duration available, streaming delay disabled")
             self._streaming_delay = None

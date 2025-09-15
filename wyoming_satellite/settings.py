@@ -56,8 +56,6 @@ class MicSettings(ServiceSettings):
     seconds_to_mute_after_awake_wav: float = 0.5
     """Extra second(s) of microphone audio to mute after awake WAV has finished playing."""
 
-    bluetooth_no_mute: bool = False
-    """True to automatically disable muting for Bluetooth devices."""
 
     channel_index: Optional[int] = None
     """Index of microphone channel to use. When not set, all input channels are used as-is."""

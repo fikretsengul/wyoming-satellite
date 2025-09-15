@@ -92,11 +92,6 @@ async def main() -> None:
         type=int,
         help="Take microphone input from a specific channel (first channel is 0)",
     )
-    parser.add_argument(
-        "--mic-bluetooth-no-mute",
-        action="store_true",
-        help="Automatically disable microphone muting for Bluetooth devices",
-    )
 
     # Sound output
     parser.add_argument("--snd-uri", help="URI of Wyoming sound service")
@@ -371,7 +366,6 @@ async def main() -> None:
             noise_suppression=args.mic_noise_suppression,
             seconds_to_mute_after_awake_wav=args.mic_seconds_to_mute_after_awake_wav,
             mute_during_awake_wav=(not args.mic_no_mute_during_awake_wav),
-            bluetooth_no_mute=args.mic_bluetooth_no_mute,
             channel_index=args.mic_channel_index,
         ),
         vad=VadSettings(
