@@ -1328,6 +1328,7 @@ class WakeStreamingSatellite(SatelliteBase):
         self._conversation_mode = False  # Track if we're in a continuous conversation
         self._last_pipeline = None  # Store the last RunPipeline request
         self._server_initiated_conversation = False  # Track server-initiated conversations
+        self._question_mode = False  # Track if we're in a question scenario
 
 
     def _clear_streaming_state(self) -> None:
@@ -1338,6 +1339,7 @@ class WakeStreamingSatellite(SatelliteBase):
         # Don't clear TTS state here - let it be managed by time-based detection
         self._interrupt_requested = False
         # Don't clear conversation mode here - it should persist across individual pipeline runs
+        # Don't clear question mode here - it needs to persist until the answer is received
 
     def _set_streaming_delays(self) -> None:
         """Set streaming delay after wake word detection."""
@@ -1364,6 +1366,7 @@ class WakeStreamingSatellite(SatelliteBase):
                 _LOGGER.info("Single question started by server")
                 self._conversation_mode = False  # Questions are single-shot
                 self._server_initiated_conversation = False
+                self._question_mode = True  # Enable question mode
                 await self._handle_server_detection(detection)
             elif detection.name == "command_end":
                 _LOGGER.info("Continuous conversation ended by server")
@@ -1420,6 +1423,11 @@ class WakeStreamingSatellite(SatelliteBase):
                 _LOGGER.debug("Transcript received in conversation mode - waiting for TTS completion")
                 self._clear_streaming_state()
                 # Don't reset conversation mode - let TTS completion handle restart
+            elif is_transcript and self._question_mode:
+                # In question mode, we're done after getting the transcript
+                _LOGGER.debug("Transcript received in question mode - question completed")
+                self._clear_streaming_state()
+                self._question_mode = False  # Clear question mode
             elif is_run_satellite or is_error:
                 # Reset conversation mode on restart or error
                 self._conversation_mode = False
@@ -1507,8 +1515,8 @@ class WakeStreamingSatellite(SatelliteBase):
         """Called when audio stopped playing - handle continuous conversation restart."""
         await super().trigger_played()
 
-        _LOGGER.debug("Audio playback completed. Conversation mode: %s, Streaming: %s, Paused: %s",
-                     self._conversation_mode, self.is_streaming, self._is_paused)
+        _LOGGER.debug("Audio playback completed. Conversation mode: %s, Question mode: %s, Streaming: %s, Paused: %s",
+                     self._conversation_mode, self._question_mode, self.is_streaming, self._is_paused)
 
         # If we're in conversation mode and not currently streaming, restart listening
         if self._conversation_mode and not self.is_streaming and not self._is_paused:
@@ -1525,6 +1533,15 @@ class WakeStreamingSatellite(SatelliteBase):
             # Note: We don't set is_streaming=True here as _handle_server_detection will do that
             fake_detection = Detection(name="command_start")
             await self._handle_server_detection(fake_detection)
+        elif self._question_mode and not self.is_streaming and not self._is_paused:
+            _LOGGER.info("Question audio completed - satellite should already be listening for answer")
+            # For questions, the pipeline should already be running and listening
+            # We don't need to restart anything, just ensure the state is correct
+            if not self.is_streaming:
+                _LOGGER.warning("Question mode but not streaming - this shouldn't happen. Restarting pipeline.")
+                # This is a fallback - the pipeline should already be running
+                fake_detection = Detection(name="question_start")
+                await self._handle_server_detection(fake_detection)
 
     async def trigger_server_disonnected(self) -> None:
         await super().trigger_server_disonnected()
@@ -1586,6 +1603,10 @@ class WakeStreamingSatellite(SatelliteBase):
             if not self._pipeline_started:
                 # Still in delay period - completely ignore audio to prevent buffering awake.wav
                 return
+
+            # Debug: Log when we're forwarding audio in question mode
+            if self._question_mode:
+                _LOGGER.debug("Question mode: forwarding microphone audio to server for processing")
 
             # Forward audio to server (pipeline is running)
             await self.event_to_server(event)
