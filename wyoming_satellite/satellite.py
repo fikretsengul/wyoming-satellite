@@ -326,7 +326,12 @@ class SatelliteBase:
         if forward_event:
             await self.forward_event(event)
 
-    async def _send_run_pipeline(self, pipeline_name: Optional[str] = None, restart_on_end: Optional[bool] = None) -> None:
+    async def _send_run_pipeline(
+        self,
+        pipeline_name: Optional[str] = None,
+        restart_on_end: Optional[bool] = None,
+        end_stage_override: Optional[PipelineStage] = None
+    ) -> None:
         """Sends a RunPipeline event with the correct stages."""
         if self.settings.wake.enabled:
             # Local wake word detection
@@ -337,7 +342,11 @@ class SatelliteBase:
             start_stage = PipelineStage.WAKE
             default_restart_on_end = not self.settings.vad.enabled
 
-        if self.settings.snd.enabled:
+        # Determine end stage
+        if end_stage_override is not None:
+            # Use the override (e.g., for questions that only need STT)
+            end_stage = end_stage_override
+        elif self.settings.snd.enabled:
             # Play TTS response
             end_stage = PipelineStage.TTS
         else:
@@ -1480,7 +1489,16 @@ class WakeStreamingSatellite(SatelliteBase):
         pipeline_name = getattr(self, '_pipeline_name', None)
         restart_on_end = self._conversation_mode or self._server_initiated_conversation
 
-        await self._send_run_pipeline(pipeline_name=pipeline_name, restart_on_end=restart_on_end)
+        # For questions, we only want STT, not the full pipeline
+        end_stage_override = None
+        if detection.name == "question_start":
+            end_stage_override = PipelineStage.ASR  # Only speech-to-text for questions
+
+        await self._send_run_pipeline(
+            pipeline_name=pipeline_name,
+            restart_on_end=restart_on_end,
+            end_stage_override=end_stage_override
+        )
         await self.forward_event(detection.event())  # forward to event service
         await self.trigger_streaming_start()
         self._pipeline_started = True
