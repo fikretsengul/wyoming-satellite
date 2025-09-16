@@ -326,16 +326,16 @@ class SatelliteBase:
         if forward_event:
             await self.forward_event(event)
 
-    async def _send_run_pipeline(self, pipeline_name: Optional[str] = None) -> None:
+    async def _send_run_pipeline(self, pipeline_name: Optional[str] = None, restart_on_end: Optional[bool] = None) -> None:
         """Sends a RunPipeline event with the correct stages."""
         if self.settings.wake.enabled:
             # Local wake word detection
             start_stage = PipelineStage.ASR
-            restart_on_end = False
+            default_restart_on_end = False
         else:
             # Remote wake word detection
             start_stage = PipelineStage.WAKE
-            restart_on_end = not self.settings.vad.enabled
+            default_restart_on_end = not self.settings.vad.enabled
 
         if self.settings.snd.enabled:
             # Play TTS response
@@ -344,20 +344,27 @@ class SatelliteBase:
             # No audio output
             end_stage = PipelineStage.HANDLE
 
+        # Use provided restart_on_end or fall back to default logic
+        final_restart_on_end = restart_on_end if restart_on_end is not None else default_restart_on_end
+
         run_pipeline = RunPipeline(
             start_stage=start_stage,
             end_stage=end_stage,
             name=pipeline_name,
-            restart_on_end=restart_on_end,
+            restart_on_end=final_restart_on_end,
             snd_format=AudioFormat(
                 rate=self.settings.snd.rate,
                 width=self.settings.snd.width,
                 channels=self.settings.snd.channels,
             ),
-        ).event()
-        _LOGGER.debug(run_pipeline)
-        await self.event_to_server(run_pipeline)
-        await self.forward_event(run_pipeline)
+        )
+
+        # Store the last pipeline for potential restart
+        self._last_pipeline = run_pipeline
+
+        _LOGGER.debug("Sending RunPipeline: %s", run_pipeline)
+        await self.event_to_server(run_pipeline.event())
+        await self.forward_event(run_pipeline.event())
 
     async def _restart(self) -> None:
         """Disconnects from services and restarts loop."""
@@ -1308,6 +1315,11 @@ class WakeStreamingSatellite(SatelliteBase):
         self._wake_info: Optional[Info] = None
         self._wake_info_ready = asyncio.Event()
 
+        # Enhanced state management for continuous conversations
+        self._conversation_mode = False  # Track if we're in a continuous conversation
+        self._last_pipeline = None  # Store the last RunPipeline request
+        self._server_initiated_conversation = False  # Track server-initiated conversations
+
 
     def _clear_streaming_state(self) -> None:
         """Clear all streaming-related state variables."""
@@ -1316,6 +1328,7 @@ class WakeStreamingSatellite(SatelliteBase):
         self._pipeline_started = False
         # Don't clear TTS state here - let it be managed by time-based detection
         self._interrupt_requested = False
+        # Don't clear conversation mode here - it should persist across individual pipeline runs
 
     def _set_streaming_delays(self) -> None:
         """Set streaming delay after wake word detection."""
@@ -1331,9 +1344,30 @@ class WakeStreamingSatellite(SatelliteBase):
     async def event_from_server(self, event: Event) -> None:
         # Handle fake Detection event from server to start a conversation
         if Detection.is_type(event.type):
-            if not self.is_streaming:
-                _LOGGER.info("Conversation started by server")
-                await self._handle_server_detection(Detection.from_event(event))
+            detection = Detection.from_event(event)
+            # Check if this is a server command to start conversation
+            if detection.name == "command_start" and not self.is_streaming:
+                _LOGGER.info("Continuous conversation started by server")
+                self._conversation_mode = True
+                self._server_initiated_conversation = True
+                await self._handle_server_detection(detection)
+            elif detection.name == "question_start" and not self.is_streaming:
+                _LOGGER.info("Single question started by server")
+                self._conversation_mode = False  # Questions are single-shot
+                self._server_initiated_conversation = False
+                await self._handle_server_detection(detection)
+            elif detection.name == "command_end":
+                _LOGGER.info("Continuous conversation ended by server")
+                self._conversation_mode = False
+                self._server_initiated_conversation = False
+                # If currently streaming, let it finish naturally
+                # If not streaming, return to wake word mode
+                if not self.is_streaming and not self._is_paused:
+                    await self._send_wake_detect()
+                    _LOGGER.info("Waiting for wake word")
+            elif not self.is_streaming:
+                _LOGGER.info("Single interaction started by server")
+                await self._handle_server_detection(detection)
             return  # This event is for client-side control only
 
         # Only check event types once
@@ -1365,13 +1399,24 @@ class WakeStreamingSatellite(SatelliteBase):
         await super().event_from_server(event)
 
         if is_run_satellite or is_transcript or is_error or is_pause_satellite:
-            # Stop streaming
-            self._clear_streaming_state()
-
+            # Handle state transitions based on conversation mode
             if is_pause_satellite:
                 self._is_paused = True
+                self._conversation_mode = False
+                self._server_initiated_conversation = False
+                self._clear_streaming_state()
                 _LOGGER.debug("Satellite is paused")
-            else:
+            elif is_transcript and self._conversation_mode:
+                # In conversation mode, wait for TTS to complete before automatically restarting
+                _LOGGER.debug("Transcript received in conversation mode - waiting for TTS completion")
+                self._clear_streaming_state()
+                # Don't reset conversation mode - let TTS completion handle restart
+            elif is_run_satellite or is_error:
+                # Reset conversation mode on restart or error
+                self._conversation_mode = False
+                self._server_initiated_conversation = False
+                self._clear_streaming_state()
+
                 # Go back to wake word detection
                 await self.trigger_streaming_stop()
 
@@ -1381,8 +1426,23 @@ class WakeStreamingSatellite(SatelliteBase):
                     _LOGGER.info("Waiting for wake word")
 
                     # Play ready sound only on startup/restart, not after transcript completion
-                    if is_run_satellite or is_error:
-                        await self._play_wav(self.settings.snd.ready_wav)
+                    await self._play_wav(self.settings.snd.ready_wav)
+
+                    # Start debug recording (wake)
+                    self._debug_recording_timestamp = time.monotonic_ns()
+                    if self.wake_audio_writer is not None:
+                        self.wake_audio_writer.start(
+                            timestamp=self._debug_recording_timestamp
+                        )
+            else:
+                # Normal transcript completion - stop streaming but maintain conversation state
+                self._clear_streaming_state()
+                await self.trigger_streaming_stop()
+
+                # If not in conversation mode, return to wake word detection
+                if not self._conversation_mode and not self._is_paused:
+                    await self._send_wake_detect()
+                    _LOGGER.info("Waiting for wake word")
 
                     # Start debug recording (wake)
                     self._debug_recording_timestamp = time.monotonic_ns()
@@ -1416,14 +1476,43 @@ class WakeStreamingSatellite(SatelliteBase):
         # No pipeline name matching needed, the server already knows.
 
         # Server detections don't need delay (no awake.wav)
-        await self._send_run_pipeline()
+        # For continuous conversations, set restart_on_end to enable continuous listening
+        pipeline_name = getattr(self, '_pipeline_name', None)
+        restart_on_end = self._conversation_mode or self._server_initiated_conversation
+
+        await self._send_run_pipeline(pipeline_name=pipeline_name, restart_on_end=restart_on_end)
         await self.forward_event(detection.event())  # forward to event service
         await self.trigger_streaming_start()
         self._pipeline_started = True
 
+    async def trigger_played(self) -> None:
+        """Called when audio stopped playing - handle continuous conversation restart."""
+        await super().trigger_played()
+
+        _LOGGER.debug("Audio playback completed. Conversation mode: %s, Streaming: %s, Paused: %s",
+                     self._conversation_mode, self.is_streaming, self._is_paused)
+
+        # If we're in conversation mode and not currently streaming, restart listening
+        if self._conversation_mode and not self.is_streaming and not self._is_paused:
+            _LOGGER.info("TTS completed in conversation mode - restarting listening")
+
+            # Restart the conversation without wake word detection
+            if self.wake_audio_writer is not None:
+                self.wake_audio_writer.stop()
+
+            if self.stt_audio_writer is not None:
+                self.stt_audio_writer.start(timestamp=self._debug_recording_timestamp)
+
+            # Create a fake server detection to restart the pipeline
+            # Note: We don't set is_streaming=True here as _handle_server_detection will do that
+            fake_detection = Detection(name="command_start")
+            await self._handle_server_detection(fake_detection)
+
     async def trigger_server_disonnected(self) -> None:
         await super().trigger_server_disonnected()
 
+        self._conversation_mode = False
+        self._server_initiated_conversation = False
         self._clear_streaming_state()
 
         # Stop debug recording (stt)
@@ -1502,6 +1591,10 @@ class WakeStreamingSatellite(SatelliteBase):
             if self.is_streaming or self._tts_playing:
                 _LOGGER.info("Wake word interrupt detected - stopping current activity (streaming: %s, tts: %s)",
                             self.is_streaming, self._tts_playing)
+
+                # Clear conversation mode on interrupt
+                self._conversation_mode = False
+                self._server_initiated_conversation = False
 
                 # Kill audio processes immediately to stop TTS
                 if self.settings.snd.command:
