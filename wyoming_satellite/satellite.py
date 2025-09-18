@@ -311,6 +311,13 @@ class SatelliteBase:
                     _LOGGER.info("Waiting for wake word")
                 return  # Don't forward this transcript to the server
 
+            # Check for start conversation sentences in single response mode
+            if not self._conversation_mode and self._is_start_conversation_request(transcript.text):
+                # Start conversation mode and continue processing the transcript
+                self._start_conversation()
+                # Continue to forward the transcript so the user gets a response
+                # The next response will be in conversation mode
+
             await self.trigger_transcript(transcript)
         elif Synthesize.is_type(event.type):
             # TTS request
@@ -1491,6 +1498,23 @@ class WakeStreamingSatellite(SatelliteBase):
                 return True
         return False
 
+    def _is_start_conversation_request(self, transcript_text: str) -> bool:
+        """Check if transcript contains a start conversation sentence."""
+        if not self.settings.start_conversation_sentences:
+            return False
+
+        text_lower = transcript_text.lower().strip()
+        for start_sentence in self.settings.start_conversation_sentences:
+            if start_sentence.lower() in text_lower:
+                return True
+        return False
+
+    def _start_conversation(self) -> None:
+        """Start continuous conversation mode."""
+        _LOGGER.info("Starting continuous conversation (start sentence detected)")
+        self._conversation_mode = True
+        # Don't set _server_initiated_conversation since this is user-initiated
+
     def _end_conversation(self) -> None:
         """End the continuous conversation mode cleanly."""
         _LOGGER.info("Ending continuous conversation (stop sentence detected)")
@@ -1614,7 +1638,10 @@ class WakeStreamingSatellite(SatelliteBase):
                 self._streaming_delay = None
                 if not self._pipeline_started:
                     _LOGGER.debug("Streaming delay ended, starting pipeline now")
-                    await self._send_run_pipeline(pipeline_name=getattr(self, '_pipeline_name', None))
+                    await self._send_run_pipeline(
+                        pipeline_name=getattr(self, '_pipeline_name', None),
+                        restart_on_end=self._conversation_mode
+                    )
                     await self.trigger_streaming_start()
                     self._pipeline_started = True
 
@@ -1729,9 +1756,17 @@ class WakeStreamingSatellite(SatelliteBase):
             # Store pipeline name for later use
             self._pipeline_name = pipeline_name
 
+            # Check if we should automatically start in conversation mode
+            if self.settings.always_start_in_conversation_mode:
+                _LOGGER.info("Auto-starting in conversation mode after wake word")
+                self._conversation_mode = True
+
             # If no streaming delay, start pipeline immediately
             if self._streaming_delay is None:
-                await self._send_run_pipeline(pipeline_name=pipeline_name)
+                await self._send_run_pipeline(
+                    pipeline_name=pipeline_name,
+                    restart_on_end=self._conversation_mode
+                )
                 self._pipeline_started = True
             else:
                 _LOGGER.debug("Delaying RunPipeline until after awake.wav (%.1f seconds)",

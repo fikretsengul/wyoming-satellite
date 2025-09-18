@@ -301,6 +301,17 @@ async def main() -> None:
         help="Sentences that will end continuous conversation mode (e.g., 'konuşmayı bitir' 'end conversation')",
     )
     parser.add_argument(
+        "--always-start-in-conversation-mode",
+        action="store_true",
+        help="Always start in conversation mode after wake word detection (default: False)",
+    )
+    parser.add_argument(
+        "--start-conversation-sentences",
+        nargs="*",
+        default=[],
+        help="Sentences that will switch from single response to conversation mode (e.g., 'sohbete başla' 'start conversation')",
+    )
+    parser.add_argument(
         "--version",
         action="version",
         version=__version__,
@@ -436,6 +447,8 @@ async def main() -> None:
         ),
         debug_recording_dir=args.debug_recording_dir,
         stop_conversation_sentences=args.stop_conversation_sentences,
+        always_start_in_conversation_mode=args.always_start_in_conversation_mode,
+        start_conversation_sentences=args.start_conversation_sentences,
     )
 
     satellite: SatelliteBase

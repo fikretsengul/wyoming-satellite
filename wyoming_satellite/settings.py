@@ -221,3 +221,9 @@ class SatelliteSettings:
 
     stop_conversation_sentences: List[str] = field(default_factory=list)
     """List of sentences that will end continuous conversation mode when detected in transcript."""
+
+    always_start_in_conversation_mode: bool = False
+    """If True, satellite will start in conversation mode after wake word detection."""
+
+    start_conversation_sentences: List[str] = field(default_factory=list)
+    """List of sentences that will switch from single response to conversation mode."""
