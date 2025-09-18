@@ -299,7 +299,19 @@ class SatelliteBase:
         elif Transcript.is_type(event.type):
             # STT text
             _LOGGER.debug(event)
-            await self.trigger_transcript(Transcript.from_event(event))
+            transcript = Transcript.from_event(event)
+
+            # Check for stop conversation sentences in continuous conversation mode
+            if self._conversation_mode and self._is_stop_conversation_request(transcript.text):
+                # End conversation immediately without forwarding transcript to server
+                self._end_conversation()
+                # Return to wake word mode
+                if not self._is_paused:
+                    await self._send_wake_detect()
+                    _LOGGER.info("Waiting for wake word")
+                return  # Don't forward this transcript to the server
+
+            await self.trigger_transcript(transcript)
         elif Synthesize.is_type(event.type):
             # TTS request
             self._tts_playing = True
@@ -1468,6 +1480,24 @@ class WakeStreamingSatellite(SatelliteBase):
                             timestamp=self._debug_recording_timestamp
                         )
 
+    def _is_stop_conversation_request(self, transcript_text: str) -> bool:
+        """Check if transcript contains a stop conversation sentence."""
+        if not self.settings.stop_conversation_sentences:
+            return False
+
+        text_lower = transcript_text.lower().strip()
+        for stop_sentence in self.settings.stop_conversation_sentences:
+            if stop_sentence.lower() in text_lower:
+                return True
+        return False
+
+    def _end_conversation(self) -> None:
+        """End the continuous conversation mode cleanly."""
+        _LOGGER.info("Ending continuous conversation (stop sentence detected)")
+        self._conversation_mode = False
+        self._server_initiated_conversation = False
+        self._clear_streaming_state()
+
     async def _handle_server_detection(self, detection: Detection) -> None:
         """Handle a fake detection event from the server to start streaming."""
         if self.is_streaming or (self.server_id is None):
@@ -1604,9 +1634,6 @@ class WakeStreamingSatellite(SatelliteBase):
                 # Still in delay period - completely ignore audio to prevent buffering awake.wav
                 return
 
-            # Debug: Log when we're forwarding audio in question mode
-            if self._question_mode:
-                _LOGGER.debug("Question mode: forwarding microphone audio to server for processing")
 
             # Forward audio to server (pipeline is running)
             await self.event_to_server(event)

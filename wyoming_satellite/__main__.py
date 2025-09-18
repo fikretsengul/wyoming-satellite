@@ -295,6 +295,12 @@ async def main() -> None:
         "--log-format", default=logging.BASIC_FORMAT, help="Format for log messages"
     )
     parser.add_argument(
+        "--stop-conversation-sentences",
+        nargs="*",
+        default=[],
+        help="Sentences that will end continuous conversation mode (e.g., 'konuşmayı bitir' 'end conversation')",
+    )
+    parser.add_argument(
         "--version",
         action="version",
         version=__version__,
@@ -429,6 +435,7 @@ async def main() -> None:
             finished_wav_delay=args.timer_finished_wav_repeat[1],
         ),
         debug_recording_dir=args.debug_recording_dir,
+        stop_conversation_sentences=args.stop_conversation_sentences,
     )
 
     satellite: SatelliteBase

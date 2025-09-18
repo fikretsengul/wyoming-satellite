@@ -218,3 +218,6 @@ class SatelliteSettings:
 
     debug_recording_dir: Optional[Path] = None
     """Path to directory where debug audio is written."""
+
+    stop_conversation_sentences: List[str] = field(default_factory=list)
+    """List of sentences that will end continuous conversation mode when detected in transcript."""
